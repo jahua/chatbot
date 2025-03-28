@@ -1,0 +1,36 @@
+# Environment variables
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+venv/
+ENV/
+env/
+
+# ChromaDB
+data/
+chroma_data/
+
+# IDE files
+.idea/
+.vscode/
+
+# Log files
+logs/
+*.log
+
+# Docker
+docker-compose.override.yml
+
+# Misc
+*.tmp
+*~
+.env
+# Python packages in virtual environment
+venv/
+env/
+*.pyc
+# Frontend packages
+frontend/node_modules/
