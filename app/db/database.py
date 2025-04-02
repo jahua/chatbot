@@ -1,4 +1,5 @@
 from sqlalchemy import create_engine, text
+from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 from typing import Dict, Any, Optional
@@ -7,56 +8,63 @@ import logging
 import traceback
 import asyncio
 
-# Create database URL from individual settings
-DATABASE_URL = f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
+logger = logging.getLogger(__name__)
 
-# Create SQLAlchemy engine
-engine = create_engine(DATABASE_URL)
+# Create SQLAlchemy engine with logging
+logger.info(f"Connecting to database at {settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}")
+engine = create_engine(
+    settings.DATABASE_URL,
+    echo=True,  # Enable SQL query logging
+    pool_pre_ping=True  # Enable connection health checks
+)
 
 # Create SessionLocal class
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Create Base class
+Base = declarative_base()
 
 def get_db():
     """Get database session"""
     db = SessionLocal()
     try:
+        logger.info("Database session created successfully")
         yield db
     finally:
         db.close()
+        logger.info("Database session closed")
 
 class DatabaseService:
     def __init__(self, db):
-        # Set up logging
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('chatbot.log', mode='a'),  # Append mode to preserve logs
-                logging.StreamHandler()  # Also log to console
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
-        self.logger.debug("Initializing DatabaseService...")
-        
         self.db = db
-        self.logger.debug("DatabaseService initialized successfully")
+        logger.info("Initializing DatabaseService...")
+        try:
+            # Test the connection using text()
+            self.db.execute(text("SELECT 1"))
+            logger.info("Database connection test successful")
+        except Exception as e:
+            logger.error(f"Database connection test failed: {str(e)}")
+            raise
+        logger.info("DatabaseService initialized successfully")
     
     async def execute_query(self, query: str) -> pd.DataFrame:
         """Execute SQL query and return results as DataFrame"""
-        self.logger.debug(f"Executing query: {query}")
+        logger.info(f"Executing query: {query}")
         try:
-            result = self.db.execute(text(query))
+            # Convert query string to SQLAlchemy text object
+            sql = text(query)
+            result = self.db.execute(sql)
             rows = result.fetchall()
             columns = result.keys()
-            self.logger.debug(f"Query returned {len(rows)} rows with columns: {columns}")
+            logger.info(f"Query returned {len(rows)} rows with columns: {columns}")
             
             df = pd.DataFrame(rows, columns=columns)
             return df
             
         except Exception as e:
             error_msg = str(e)
-            self.logger.error(f"Error executing query: {error_msg}")
-            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Error executing query: {error_msg}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
     
     async def save_conversation(
@@ -68,50 +76,39 @@ class DatabaseService:
         error: Optional[str] = None
     ) -> None:
         """Save conversation to database"""
-        self.logger.debug(f"Saving conversation for session {session_id}")
+        logger.info(f"Saving conversation for session {session_id}")
         try:
             # Convert response to JSON string if present
             response_json = None
             if response:
                 response_json = str(response)  # Simple string conversion for now
             
-            # Create SQL query
+            # Create SQL query using text()
             query = text("""
-                INSERT INTO conversations (
-                    session_id,
-                    user_message,
-                    sql_query,
-                    response,
-                    error,
-                    created_at
-                ) VALUES (
-                    :session_id,
-                    :user_message,
-                    :sql_query,
-                    :response,
-                    :error,
-                    NOW()
-                )
+            INSERT INTO conversations (conversation_id, user_message, assistant_message, metadata)
+            VALUES (:conversation_id, :user_message, :assistant_message, :metadata)
             """)
             
             # Execute query
-            self.db.execute(
+            await self.db.execute(
                 query,
                 {
-                    "session_id": session_id,
+                    "conversation_id": session_id,
                     "user_message": user_message,
-                    "sql_query": sql_query,
-                    "response": response_json,
-                    "error": error
+                    "assistant_message": response_json,
+                    "metadata": {
+                        "sql_query": sql_query,
+                        "error": error
+                    }
                 }
             )
-            self.db.commit()
-            self.logger.debug("Conversation saved successfully")
+            await self.db.commit()
+            logger.info("Conversation saved successfully")
             
         except Exception as e:
             error_msg = str(e)
-            self.logger.error(f"Error saving conversation: {error_msg}")
-            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Error saving conversation: {error_msg}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             self.db.rollback()
             raise
 

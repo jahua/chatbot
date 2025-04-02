@@ -6,17 +6,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings(BaseSettings):
-    # API Settings
+    PROJECT_NAME: str = "Tourism Data Chatbot API"
+    VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
-    PROJECT_NAME: str = "Tourism Data Chatbot"
     
-    # Database Settings
-    DB_HOST: str = "localhost"
-    DB_PORT: str = "5432"
-    DB_NAME: str = "tourism_data"
-    DB_USER: str = "postgres"
-    DB_PASSWORD: str = "postgres"
-    DB_SCHEMA: str = os.getenv("DB_SCHEMA", "data_lake")
+    # Database settings
+    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "localhost")
+    POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
+    POSTGRES_USER: str = os.getenv("POSTGRES_USER", "postgres")
+    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "")
+    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "trip_dw")
+    DB_SCHEMA: str = os.getenv("DB_SCHEMA", "public")
+    DATABASE_URL: Optional[str] = None
     
     # Vector Store Settings
     CHROMA_HOST: str = os.getenv("CHROMA_HOST", "localhost")
@@ -24,30 +25,36 @@ class Settings(BaseSettings):
     
     # LLM Settings
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "sqlcoder:7b")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama2")
+    
+    # OpenAI Settings
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
     
     # Security Settings
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key-here")
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
     
-    # Gemini API settings
+    # Google Settings
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
     
     # Anthropic Settings
-    ANTHROPIC_API_KEY: str
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     
-    # LangSmith Settings
-    LANGCHAIN_API_KEY: str
-    LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
-    LANGCHAIN_PROJECT: str = "tourism_chatbot"
-    LANGCHAIN_TRACING_V2: bool = True
+    # LangChain Settings
+    LANGCHAIN_API_KEY: str = os.getenv("LANGCHAIN_API_KEY", "")
+    LANGCHAIN_ENDPOINT: str = os.getenv("LANGCHAIN_ENDPOINT", "")
+    LANGCHAIN_PROJECT: str = os.getenv("LANGCHAIN_PROJECT", "default")
+    LANGCHAIN_TRACING_V2: bool = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
     
-    class Config:
-        case_sensitive = True
-        env_file = ".env"
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.DATABASE_URL = f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
 
 settings = Settings() 

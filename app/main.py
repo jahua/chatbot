@@ -5,8 +5,8 @@ from app.core.config import settings
 from app.models.chat import ChatMessage, ChatResponse
 from app.db.database import get_db, DatabaseService
 from sqlalchemy.orm import Session
-from app.llm.claude_adapter import ClaudeAdapter
 import logging
+from typing import Dict, Any
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -26,63 +26,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_db_service():
-    db = next(get_db())
-    db_service = DatabaseService(db)
+def get_chat_service(db: Session = Depends(get_db)) -> ChatService:
+    """Get ChatService instance with database session"""
     try:
-        yield db_service
-    finally:
-        db_service.db.close()
-
-def get_chat_service(db_service: DatabaseService = Depends(get_db_service)):
-    # Create database URL
-    database_url = f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
-    
-    # Initialize ClaudeAdapter with database URL
-    claude_adapter = ClaudeAdapter(database_url)
-    
-    # Initialize ChatService with dependencies
-    chat_service = ChatService(db_service, claude_adapter)
-    return chat_service
+        chat_service = ChatService(db)
+        return chat_service
+    except Exception as e:
+        logger.error(f"Error initializing ChatService: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error initializing chat service: {str(e)}")
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to the Chatbot API"}
+    return {"message": "Welcome to the Tourism Data Chatbot API"}
 
 @app.post("/api/chat/message")
-async def chat(
-    request: ChatMessage,
+async def process_message(
+    message: Dict[str, Any],
     chat_service: ChatService = Depends(get_chat_service)
-) -> ChatResponse:
-    """Process a chat message and return a response"""
-    logger.debug(f"Received chat request: message='{request.message}' session_id='{request.session_id}'")
-    
+) -> Dict[str, Any]:
+    """Process a chat message"""
     try:
-        # Process message with visualization
-        response = await chat_service.process_message_with_visualization(
-            message=request.message,
-            session_id=request.session_id
-        )
-        
-        # Format response according to ChatResponse model
-        return ChatResponse(
-            message=response.get("message", "No response available"),
-            sql_query=response.get("sql_query"),
-            results={"data": response.get("data", []), "type": response.get("type", "general")},
-            type=response.get("type"),
-            plot=response.get("plot"),
-            statistics=response.get("statistics"),
-            success=True,
-            response=response.get("message", "No response available")
-        )
-        
+        # Extract content from message
+        content = message.get("content", message.get("message", ""))
+        if not content:
+            raise HTTPException(status_code=400, detail="Message content is required")
+            
+        response = await chat_service.process_message(content)
+        return response
     except Exception as e:
-        logger.error(f"Error processing chat request: {str(e)}")
-        return ChatResponse(
-            message=f"Error processing chat request: {str(e)}",
-            success=False,
-            response=f"Error processing chat request: {str(e)}"
-        )
+        logger.error(f"Error processing message: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():
@@ -94,7 +67,7 @@ async def get_schema(
     chat_service: ChatService = Depends(get_chat_service)
 ):
     try:
-        schema_info = chat_service.get_schema_summary()
+        schema_info = chat_service._load_schema_summary()
         return {"success": True, "schema": schema_info}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) 
