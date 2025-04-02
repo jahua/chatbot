@@ -11,7 +11,6 @@ import asyncio
 from app.services.conversation_service import ConversationService
 import json
 from datetime import datetime
-import plotly.graph_objects as go
 import time
 from fastapi import HTTPException
 from app.core.config import settings
@@ -38,27 +37,46 @@ class ChatService:
     
     def is_conversational_message(self, message: str) -> bool:
         """Detect if a message is conversational rather than a data query"""
-        # List of common greetings and conversational phrases
-        greetings = [
-            "hi", "hello", "hey", "greetings", "good morning", "good afternoon", 
-            "good evening", "how are you", "what's up", "howdy", "hola", 
-            "nice to meet you", "thanks", "thank you"
-        ]
+        # Clean and normalize the message
+        message = message.strip().lower()
         
-        # Clean the message
-        cleaned_message = message.lower().strip()
+        # Define greetings that should trigger conversational response
+        pure_greetings = ["hi", "hello", "hey", "greetings", "hi there", "hello there", 
+                          "thanks", "thank you", "goodbye", "bye", "good morning", 
+                          "good afternoon", "good evening"]
         
-        # Check for simple greetings
-        if any(greeting in cleaned_message for greeting in greetings):
+        # Check if the message is EXACTLY a greeting
+        if message in pure_greetings:
             return True
             
-        # Check for very short messages (less than 3 words)
-        if len(cleaned_message.split()) < 3:
+        # Check if it looks like a question about data (not just a greeting)
+        question_words = ["what", "which", "where", "how", "when", "who", "show", 
+                          "list", "find", "tell", "give", "display", "query", 
+                          "analyze", "get", "calculate"]
+                          
+        data_related_terms = ["industry", "visitor", "spending", "tourism", "busiest", 
+                              "week", "day", "month", "year", "quarter", "pattern", 
+                              "trend", "statistics", "data", "amount", "total", 
+                              "average", "count", "transaction", "swiss", "foreign", 
+                              "domestic", "international", "spring", "summer", 
+                              "winter", "fall", "autumn", "region", "location", 
+                              "period", "season", "txn", "amt"]
+        
+        # If it contains question words AND data terms, it's a data query, not just conversation
+        for word in question_words:
+            if word in message.split():
+                for term in data_related_terms:
+                    if term in message:
+                        return False  # It's a data query, not just conversation
+        
+        # If very short and not obviously a data query, treat as conversation
+        if len(message.split()) < 3:
             return True
             
-        # Check if it looks like a question about the bot itself
+        # Check if it's asking about the bot itself rather than data
         bot_references = ["you", "your", "yourself", "chatbot", "bot", "assistant", "ai"]
-        if any(ref in cleaned_message.split() for ref in bot_references) and len(cleaned_message.split()) < 6:
+        bot_reference_count = sum(1 for ref in bot_references if ref in message.split())
+        if bot_reference_count > 0 and len(message.split()) < 6:
             return True
             
         return False
@@ -242,6 +260,85 @@ class ChatService:
             
             # Convert results to DataFrame for potential analysis/visualization
             df = pd.DataFrame(results)
+            
+            # Prepare visualization data if applicable
+            visualization_data = None
+            if not df.empty:
+                # Time series data with week_start/aoi_date and total_visitors/visitors
+                if ('week_start' in df.columns or 'aoi_date' in df.columns) and \
+                   ('total_visitors' in df.columns or 'visitors' in df.columns):
+                    x_col = 'week_start' if 'week_start' in df.columns else 'aoi_date'
+                    y_col = 'total_visitors' if 'total_visitors' in df.columns else 'visitors'
+                    
+                    # Convert Decimal values to float
+                    df[y_col] = df[y_col].astype(float)
+                    
+                    # Use area chart for time series with many points
+                    if len(df) > 10:
+                        visualization_data = {
+                            'type': 'area',
+                            'data': df.to_dict('records'),
+                            'x_axis': x_col,
+                            'y_axis': y_col
+                        }
+                    else:
+                        visualization_data = {
+                            'type': 'line',
+                            'data': df.to_dict('records'),
+                            'x_axis': x_col,
+                            'y_axis': y_col
+                        }
+                
+                # Comparison data (e.g., Swiss vs Foreign tourists)
+                elif ('swiss_tourists' in df.columns or 'total_swiss_tourists' in df.columns) and \
+                     ('foreign_tourists' in df.columns or 'total_foreign_tourists' in df.columns):
+                    swiss_col = 'total_swiss_tourists' if 'total_swiss_tourists' in df.columns else 'swiss_tourists'
+                    foreign_col = 'total_foreign_tourists' if 'total_foreign_tourists' in df.columns else 'foreign_tourists'
+                    
+                    # Convert Decimal values to float
+                    df[swiss_col] = df[swiss_col].astype(float)
+                    df[foreign_col] = df[foreign_col].astype(float)
+                    
+                    # Use pie chart for comparison
+                    total_swiss = float(df[swiss_col].iloc[0])
+                    total_foreign = float(df[foreign_col].iloc[0])
+                    
+                    visualization_data = {
+                        'type': 'pie',
+                        'data': [
+                            {'category': 'Swiss Tourists', 'value': total_swiss},
+                            {'category': 'Foreign Tourists', 'value': total_foreign}
+                        ]
+                    }
+                
+                # Scatter plot for correlation analysis
+                elif len(df.columns) >= 2 and all(df[col].dtype.kind in 'biufc' for col in df.columns[:2]):
+                    numeric_cols = [col for col in df.columns if df[col].dtype.kind in 'biufc']
+                    if len(numeric_cols) >= 2:
+                        x_col, y_col = numeric_cols[:2]
+                        df[x_col] = df[x_col].astype(float)
+                        df[y_col] = df[y_col].astype(float)
+                        
+                        visualization_data = {
+                            'type': 'scatter',
+                            'data': df.to_dict('records'),
+                            'x_axis': x_col,
+                            'y_axis': y_col
+                        }
+                
+                # Categorical data (e.g., industry analysis)
+                elif 'industry' in df.columns and any(col for col in df.columns if col.endswith(('_amt', '_cnt', '_total', '_count'))):
+                    value_col = next(col for col in df.columns if col.endswith(('_amt', '_cnt', '_total', '_count')))
+                    
+                    # Convert Decimal values to float
+                    df[value_col] = df[value_col].astype(float)
+                    
+                    visualization_data = {
+                        'type': 'bar',
+                        'data': df.to_dict('records'),
+                        'x_axis': 'industry',
+                        'y_axis': value_col
+                    }
 
             # Generate response using LLM
             llm_response = None
@@ -263,6 +360,7 @@ class ChatService:
                 "response": llm_response if llm_response else "Could not generate a textual response.",
                 "data": results, # Send raw results for frontend to potentially display
                 "sql_query": cleaned_query,
+                "visualization": visualization_data,
                 "error": llm_error # Report LLM error if any
             }
             
