@@ -184,4 +184,55 @@ def create_visitor_correlation_chart(
         yaxis_title='Total Spending'
     )
     
+    return fig
+
+def create_swiss_foreign_comparison_chart(swiss_tourists: int, foreign_tourists: int, title: str = "Swiss vs. Foreign Tourists Comparison") -> go.Figure:
+    """Create a bar chart comparing Swiss and foreign tourists"""
+    # Create data for bar chart
+    categories = ["Swiss Tourists", "Foreign Tourists"]
+    values = [swiss_tourists, foreign_tourists]
+    
+    # Create horizontal bar chart with custom styling
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        y=categories,
+        x=values,
+        orientation='h',
+        marker=dict(
+            color=['#D81B60', '#1E88E5'],
+            line=dict(color='rgba(0, 0, 0, 0.5)', width=1)
+        ),
+        text=[f"{value:,}" for value in values],
+        textposition='outside',
+    ))
+    
+    # Update layout for better appearance
+    fig.update_layout(
+        title=title,
+        xaxis_title='Number of Tourists',
+        yaxis=dict(
+            title='Tourist Origin',
+            showgrid=False
+        ),
+        bargap=0.3,
+        plot_bgcolor='white',
+        margin=dict(l=10, r=10, t=50, b=10),
+        height=400,
+        width=800
+    )
+    
+    # Add percentage annotations
+    total = sum(values)
+    percentages = [value / total * 100 for value in values]
+    
+    for i, (value, percentage) in enumerate(zip(values, percentages)):
+        fig.add_annotation(
+            x=value/2,
+            y=categories[i],
+            text=f"{percentage:.1f}%",
+            showarrow=False,
+            font=dict(color='white', size=14)
+        )
+    
     return fig 

@@ -12,9 +12,9 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     
     # Database settings
-    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "localhost")
+    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "3.76.40.121")
     POSTGRES_USER: str = os.getenv("POSTGRES_USER", "postgres")
-    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "")
+    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "336699")
     POSTGRES_DB: str = os.getenv("POSTGRES_DB", "trip_dw")
     POSTGRES_PORT: str = os.getenv("POSTGRES_PORT", "5432")
     DB_SCHEMA: str = os.getenv("DB_SCHEMA", "data_lake")
