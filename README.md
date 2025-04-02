@@ -1,125 +1,100 @@
-# Tourism SQL RAG System
+# Tourism Data Chatbot
 
-A RAG-enhanced Text-to-SQL system for tourism data analysis, featuring natural language querying of tourism data stored in PostgreSQL.
+An intelligent chatbot system for analyzing tourism data in Switzerland, powered by Claude AI.
 
 ## Features
 
-- Natural language to SQL query conversion
-- RAG-enhanced schema understanding
-- Real-time query execution
-- Interactive chat interface
-- Beautiful data visualization
-- Local LLM support via Ollama
+- Interactive chat interface built with Streamlit
+- Backend API powered by FastAPI
+- Data analysis and visualization capabilities
+- Support for querying tourism statistics
+- Real-time data visualization with Plotly
+- Session management and chat history
 
-## Prerequisites
+## Tech Stack
 
-- Python 3.8+
-- Node.js 18+
+- Python 3.11+
+- FastAPI
+- Streamlit
 - PostgreSQL
-- Ollama (for local LLM)
-- ChromaDB (for vector storage)
+- Claude AI
+- Plotly
+- Pandas
 
 ## Setup
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
-cd tourism-sql-rag
+git clone https://github.com/jahua/chatbot.git
+cd chatbot
 ```
 
-2. Set up the backend:
+2. Create and activate virtual environment:
 ```bash
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python -m venv venv311
+source venv311/bin/activate  # On Windows: venv311\Scripts\activate
+```
 
-# Install dependencies
+3. Install dependencies:
+```bash
 pip install -r requirements.txt
+```
 
-# Set up environment variables
+4. Set up environment variables:
+```bash
 cp .env.example .env
 # Edit .env with your configuration
 ```
 
-3. Set up the frontend:
+5. Initialize the database:
 ```bash
-cd frontend
-npm install
-```
-
-4. Start Ollama and pull the model:
-```bash
-# Start Ollama service
-ollama serve
-
-# Pull the SQLCoder model
-ollama pull sqlcoder:7b
-```
-
-5. Start ChromaDB:
-```bash
-# Start ChromaDB service
-docker run -p 8000:8000 chromadb/chroma
+python initialize_db.py
 ```
 
 ## Running the Application
 
-1. Start the backend:
+1. Start the backend server:
 ```bash
-# From the root directory
-uvicorn main:app --reload
+cd chatbot
+python -m uvicorn app.main:app --port 8001 --reload
 ```
 
-2. Start the frontend:
+2. Start the frontend application:
 ```bash
-# From the frontend directory
-npm run dev
+cd frontend
+streamlit run app.py
 ```
 
-3. Access the application:
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:8000
-- API Documentation: http://localhost:8000/docs
+The application will be available at:
+- Frontend: http://localhost:8501
+- Backend API: http://localhost:8001
 
-## Usage
+## Project Structure
 
-1. Open the chat interface in your browser
-2. Type your question about tourism data in natural language
-3. The system will:
-   - Convert your question to SQL
-   - Execute the query
-   - Display the results
-   - Provide a natural language explanation
-
-## Example Queries
-
-- "Show me the total number of visitors by region"
-- "What are the top 5 tourist destinations?"
-- "Compare visitor numbers between 2022 and 2023"
-- "Which regions had the highest growth in tourism revenue?"
-
-## Architecture
-
-The system consists of several key components:
-
-1. **Frontend**: Next.js application with a modern chat interface
-2. **Backend**: FastAPI service handling:
-   - Natural language processing
-   - SQL query generation
-   - Database interactions
-   - RAG-enhanced context
-3. **LLM**: Local SQLCoder model via Ollama
-4. **Vector Store**: ChromaDB for schema understanding
-5. **Database**: PostgreSQL for tourism data
+```
+chatbot/
+├── app/                    # Backend application
+│   ├── core/              # Core functionality
+│   ├── db/                # Database models and connection
+│   ├── llm/              # LLM integration
+│   ├── models/           # Data models
+│   ├── schemas/          # Pydantic schemas
+│   └── services/         # Business logic
+├── frontend/             # Streamlit frontend
+├── tests/               # Test suite
+├── .env                 # Environment variables
+├── requirements.txt     # Python dependencies
+└── README.md           # Project documentation
+```
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. # RAG-chat
+This project is licensed under the MIT License - see the LICENSE file for details.

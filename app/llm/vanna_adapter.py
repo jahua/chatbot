@@ -11,15 +11,15 @@ class VannaAdapter:
         
         # Initialize database connection
         self.vn.connect_to_postgres(
-            host=settings.POSTGRES_SERVER,
-            port=settings.POSTGRES_PORT,
-            database=settings.POSTGRES_DB,
-            user=settings.POSTGRES_USER,
-            password=settings.POSTGRES_PASSWORD
+            host=settings.DB_HOST,
+            port=settings.DB_PORT,
+            database=settings.DB_NAME,
+            user=settings.DB_USER,
+            password=settings.DB_PASSWORD
         )
         
         # Set the schema
-        self.vn.set_schema(settings.POSTGRES_SCHEMA)
+        self.vn.set_schema(settings.DB_SCHEMA)
         
         # Train Vanna on the schema
         self.vn.train()
