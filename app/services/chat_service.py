@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
-from app.db.database import SessionLocal, DatabaseService
+from app.db.database import SessionLocal, DatabaseService, get_db
 from app.llm.openai_adapter import OpenAIAdapter
 from app.schemas.chat import ChatMessage, ChatResponse
 from sqlalchemy import text
@@ -18,23 +18,22 @@ from decimal import Decimal
 import uuid
 from app.utils.sql_utils import extract_sql_query, clean_sql_query
 import re
+import psycopg2
+import plotly.graph_objects as go
+from app.utils.visualization import create_visualization, figure_to_base64
+from app.utils.sql_generator import generate_sql_query
+from app.utils.analysis_generator import generate_analysis_summary
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class ChatService:
-    def __init__(self):
-        """Initialize chat service with LLM and database connections"""
-        try:
-            logger.info("Initializing ChatService")
-            self.llm = OpenAIAdapter()
-            self.db = DatabaseService()
-            logger.info("ChatService initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing ChatService: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
-    
+    def __init__(self, openai_adapter: OpenAIAdapter, db: DatabaseService):
+        """Initialize chat service with OpenAI adapter and database connection"""
+        self.openai_adapter = openai_adapter
+        self.db = db
+        logger.info("ChatService initialized successfully")
+
     def is_conversational_message(self, message: str) -> bool:
         """Detect if a message is conversational rather than a data query"""
         # Clean and normalize the message
@@ -150,229 +149,62 @@ class ChatService:
             return "I can help you analyze tourism data including visitor statistics and transaction data. Please ask a specific question about tourism patterns."
     
     async def process_message(self, message: str) -> Dict[str, Any]:
-        """Process user message and return response"""
-        start_time = time.time()
-        
+        """Process user message and return response with analysis"""
         try:
-            logger.debug(f"Processing message: {message}")
-            
-            # Check if this is a conversational message rather than a data query
-            if self.is_conversational_message(message):
-                logger.info("Detected conversational message, providing standard response")
-                response = {
-                    "response": "Hello! I'm your tourism data assistant. I can help you analyze tourism data. Ask me questions like 'What are the peak tourism periods in 2023?' or 'What are the weekly visitor patterns in spring 2023?'",
-                    "data": [],
-                    "sql_query": None,
-                    "error": None
-                }
-                return response
-            
-            # Check if the user is asking about available data or schema
-            if self.is_schema_inquiry(message):
-                logger.info("Detected schema inquiry, providing schema information")
-                schema_summary = await self.get_schema_summary()
-                response = {
-                    "response": schema_summary,
-                    "data": [],
-                    "sql_query": None,
-                    "error": None
-                }
-                return response
-            
-            # Get SQL query from LLM
-            sql_query = await self.llm.generate_sql_query(message)
-            logger.debug(f"Generated SQL query: {sql_query}")
-            
-            if not sql_query:
-                logger.error("No SQL query generated")
-                return {"response": "Sorry, I couldn't generate a SQL query for your question.", "error": "Could not generate SQL query"}
-            
-            # Check if the generated "SQL" is actually conversational text
-            # This can happen if the LLM outputs explanatory text instead of SQL
-            if re.search(r'\b(hello|hi|hey|greetings|sorry|assist|help you|welcome)\b', sql_query.lower()):
-                logger.warning("LLM returned conversational text instead of SQL")
-                return {
-                    "response": "I apologize, but I couldn't generate a proper SQL query for your question. Please try rephrasing your question to focus on specific tourism data analysis.",
-                    "data": [],
-                    "sql_query": None,
-                    "error": "Generated text was conversational, not SQL"
-                }
-            
-            # Clean and validate SQL query if needed
-            cleaned_query = sql_query.strip()
+            # Generate SQL query
+            sql_query = generate_sql_query(message)
+            logger.info(f"Generated SQL query: {sql_query}")
 
             # Execute query
-            results = []
-            db_error = None
-            try:
-                logger.debug(f"Executing SQL query: {cleaned_query}")
-                start_db_time = time.time()
-                results = await self.db.execute_query(cleaned_query)
-                db_duration = time.time() - start_db_time
-                logger.debug(f"Query returned {len(results)} results in {db_duration:.2f}s")
-            except Exception as e:
-                logger.error(f"Database query error: {str(e)}")
-                logger.error(traceback.format_exc())
-                error_str = str(e)
-                # Provide more user-friendly error messages for common database errors
-                if "column" in error_str and "does not exist" in error_str:
-                    # Extract column name from the error message
-                    column_match = re.search(r'column "([^"]+)" does not exist', error_str)
-                    if column_match:
-                        column_name = column_match.group(1)
-                        
-                        # Provide specific guidance for common column issues
-                        if column_name == "transaction_date":
-                            return {
-                                "response": "I encountered an error with the column name. The correct column for transaction dates in the master_card table is 'txn_date', not 'transaction_date'.",
-                                "error": f"Column name error: Use 'txn_date' instead of 'transaction_date'"
-                            }
-                        elif column_name == "amount":
-                            return {
-                                "response": "I encountered an error with the column name. The correct column for transaction amounts in the master_card table is 'txn_amt', not 'amount'.",
-                                "error": f"Column name error: Use 'txn_amt' instead of 'amount'"
-                            }
-                        elif column_name == "date":
-                            return {
-                                "response": "I encountered an error with the column name. The correct column for dates in the aoi_days_raw table is 'aoi_date', not 'date'.",
-                                "error": f"Column name error: Use 'aoi_date' instead of 'date'"
-                            }
-                        else:
-                            return {
-                                "response": f"I encountered an error with the database query. The column '{column_name}' does not exist in the table. Please try a different query with the correct column names.",
-                                "error": f"Column name error: '{column_name}' does not exist"
-                            }
-                    else:
-                        return {
-                            "response": "I encountered an error with the database schema. A column referenced in the query doesn't exist. Please try a different query with the correct column names.",
-                            "error": f"Database error: {error_str}"
-                        }
-                elif "syntax error" in error_str.lower():
-                    return {
-                        "response": "I encountered a syntax error in the SQL query. This might be due to incorrect SQL formatting. Please try rephrasing your question.",
-                        "error": f"SQL syntax error: {error_str}"
-                    }
-                else:
-                    return {
-                        "response": f"There was an error executing the database query: {error_str}. Please try rephrasing your question.",
-                        "error": f"Database error: {error_str}"
-                    }
-            
-            # Convert results to DataFrame for potential analysis/visualization
-            df = pd.DataFrame(results)
-            
-            # Prepare visualization data if applicable
-            visualization_data = None
-            if not df.empty:
-                # Time series data with week_start/aoi_date and total_visitors/visitors
-                if ('week_start' in df.columns or 'aoi_date' in df.columns) and \
-                   ('total_visitors' in df.columns or 'visitors' in df.columns):
-                    x_col = 'week_start' if 'week_start' in df.columns else 'aoi_date'
-                    y_col = 'total_visitors' if 'total_visitors' in df.columns else 'visitors'
-                    
-                    # Convert Decimal values to float
-                    df[y_col] = df[y_col].astype(float)
-                    
-                    # Use area chart for time series with many points
-                    if len(df) > 10:
-                        visualization_data = {
-                            'type': 'area',
-                            'data': df.to_dict('records'),
-                            'x_axis': x_col,
-                            'y_axis': y_col
-                        }
-                    else:
-                        visualization_data = {
-                            'type': 'line',
-                            'data': df.to_dict('records'),
-                            'x_axis': x_col,
-                            'y_axis': y_col
-                        }
-                
-                # Comparison data (e.g., Swiss vs Foreign tourists)
-                elif ('swiss_tourists' in df.columns or 'total_swiss_tourists' in df.columns) and \
-                     ('foreign_tourists' in df.columns or 'total_foreign_tourists' in df.columns):
-                    swiss_col = 'total_swiss_tourists' if 'total_swiss_tourists' in df.columns else 'swiss_tourists'
-                    foreign_col = 'total_foreign_tourists' if 'total_foreign_tourists' in df.columns else 'foreign_tourists'
-                    
-                    # Convert Decimal values to float
-                    df[swiss_col] = df[swiss_col].astype(float)
-                    df[foreign_col] = df[foreign_col].astype(float)
-                    
-                    # Use pie chart for comparison
-                    total_swiss = float(df[swiss_col].iloc[0])
-                    total_foreign = float(df[foreign_col].iloc[0])
-                    
-                    visualization_data = {
-                        'type': 'pie',
-                        'data': [
-                            {'category': 'Swiss Tourists', 'value': total_swiss},
-                            {'category': 'Foreign Tourists', 'value': total_foreign}
-                        ]
-                    }
-                
-                # Scatter plot for correlation analysis
-                elif len(df.columns) >= 2 and all(df[col].dtype.kind in 'biufc' for col in df.columns[:2]):
-                    numeric_cols = [col for col in df.columns if df[col].dtype.kind in 'biufc']
-                    if len(numeric_cols) >= 2:
-                        x_col, y_col = numeric_cols[:2]
-                        df[x_col] = df[x_col].astype(float)
-                        df[y_col] = df[y_col].astype(float)
-                        
-                        visualization_data = {
-                            'type': 'scatter',
-                            'data': df.to_dict('records'),
-                            'x_axis': x_col,
-                            'y_axis': y_col
-                        }
-                
-                # Categorical data (e.g., industry analysis)
-                elif 'industry' in df.columns and any(col for col in df.columns if col.endswith(('_amt', '_cnt', '_total', '_count'))):
-                    value_col = next(col for col in df.columns if col.endswith(('_amt', '_cnt', '_total', '_count')))
-                    
-                    # Convert Decimal values to float
-                    df[value_col] = df[value_col].astype(float)
-                    
-                    visualization_data = {
-                        'type': 'bar',
-                        'data': df.to_dict('records'),
-                        'x_axis': 'industry',
-                        'y_axis': value_col
-                    }
+            results = self.db.execute_query(sql_query)
+            num_rows = len(results) if results else 0
+            logger.info(f"Query returned {num_rows} rows")
 
-            # Generate response using LLM
-            llm_response = None
-            llm_error = None
-            try:
-                logger.debug("Generating LLM response")
-                start_llm_time = time.time()
-                llm_response = await self.llm.generate_response(message, df.to_string() if not df.empty else "No data returned from query.")
-                llm_duration = time.time() - start_llm_time
-                logger.debug(f"LLM response generated successfully in {llm_duration:.2f}s")
-            except Exception as e:
-                logger.error(f"LLM response error: {str(e)}")
-                logger.error(traceback.format_exc())
-                llm_error = f"LLM error: {str(e)}"
-                llm_response = "I found some data but couldn't generate a detailed analysis. Please try rephrasing your question."
-            
-            # Prepare final response structure
-            response_data = {
-                "response": llm_response if llm_response else "Could not generate a textual response.",
-                "data": results, # Send raw results for frontend to potentially display
-                "sql_query": cleaned_query,
-                "visualization": visualization_data,
-                "error": llm_error # Report LLM error if any
+            # Generate visualization
+            fig = create_visualization(results, message)
+            viz_data = figure_to_base64(fig) if fig else None
+
+            # Generate analysis
+            analysis = generate_analysis_summary(results)
+            logger.info("Generated analysis summary")
+
+            # Format response
+            response = f"""
+# 🏔️ Tourism Data Analysis
+
+{analysis}
+
+## 🔍 Analysis Process
+✅ SQL Generation
+```sql
+{sql_query}
+```
+
+✅ Query Execution
+Retrieved {num_rows} rows
+
+{'✅' if viz_data else '❌'} Visualization
+{'' if viz_data else 'Failed to generate visualization'}
+
+✅ Analysis
+Generated analysis summary
+"""
+            return {
+                "response": response,
+                "visualization": viz_data,
+                "query": sql_query,
+                "success": True
             }
             
-            total_duration = time.time() - start_time
-            logger.info(f"Total processing time for message: {total_duration:.2f}s")
-            return response_data
-            
         except Exception as e:
-            logger.error(f"Critical error processing message: {str(e)}")
-            logger.error(traceback.format_exc())
-            return {"response": f"I encountered an error processing your request: {str(e)}", "error": f"Critical error processing message: {str(e)}"}
-            
+            logger.error(f"Error processing message: {str(e)}")
+            return {
+                "response": f"Error processing your request: {str(e)}",
+                "visualization": None,
+                "query": None,
+                "success": False
+            }
+    
     async def get_schema_info(self) -> List[Dict[str, Any]]:
         """Get database schema information"""
         try:
@@ -401,18 +233,41 @@ class ChatService:
             raise
     
     def close(self):
-        """Close connections"""
-        try:
-            logger.debug("Closing ChatService connections")
-            if hasattr(self, 'db'):
-                self.db.close()
-            logger.debug("ChatService connections closed")
-        except Exception as e:
-            logger.error(f"Error closing ChatService: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
+        """Close database connection"""
+        if self.db:
+            self.db.close()
 
     def __del__(self):
         """Cleanup when the service is destroyed"""
         if hasattr(self, 'db'):
             self.db.close() 
+
+    async def generate_sql_query(self, message: str) -> str:
+        """Generate SQL query from user message"""
+        try:
+            sql_query = generate_sql_query(message)
+            logger.info(f"Generated SQL query: {sql_query}")
+            return sql_query
+        except Exception as e:
+            logger.error(f"Error generating SQL query: {str(e)}")
+            raise
+    
+    async def execute_query(self, sql_query: str) -> List[Dict[str, Any]]:
+        """Execute SQL query and return results"""
+        try:
+            results = self.db.execute_query(sql_query)
+            logger.info(f"Query returned {len(results)} rows")
+            return results
+        except Exception as e:
+            logger.error(f"Error executing query: {str(e)}")
+            raise
+    
+    async def generate_analysis(self, data: List[Dict[str, Any]], query: str) -> str:
+        """Generate analysis from query results"""
+        try:
+            analysis = generate_analysis(data, query)
+            logger.info("Generated analysis summary")
+            return analysis
+        except Exception as e:
+            logger.error(f"Error generating analysis: {str(e)}")
+            raise 

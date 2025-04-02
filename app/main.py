@@ -1,23 +1,17 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import ChatService
-from app.core.config import settings
-from app.schemas.chat import ChatMessage, ChatResponse
-from app.db.database import DatabaseService, SessionLocal, get_db
-from sqlalchemy.orm import Session
+from app.db.database import DatabaseService
+from app.llm.openai_adapter import OpenAIAdapter
 import logging
-from typing import Dict, Any
-import traceback
-from pydantic import BaseModel
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json"
-)
+# Create FastAPI app
+app = FastAPI(title="Tourism Data Analysis Chatbot")
 
 # Configure CORS
 app.add_middleware(
@@ -28,16 +22,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize services
+# Global service instances
 chat_service = None
+openai_adapter = None
+db_service = None
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup"""
-    global chat_service
     try:
-        chat_service = ChatService()
-        logger.info("Services initialized successfully")
+        global chat_service, openai_adapter, db_service
+        
+        # Initialize OpenAI adapter
+        openai_adapter = OpenAIAdapter()
+        logger.info("OpenAI adapter initialized")
+        
+        # Initialize database service
+        db_service = DatabaseService()
+        logger.info("Database service initialized")
+        
+        # Initialize chat service with dependencies
+        chat_service = ChatService(openai_adapter=openai_adapter, db=db_service)
+        logger.info("Chat service initialized")
+        
     except Exception as e:
         logger.error(f"Error initializing services: {str(e)}")
         raise
@@ -45,46 +52,29 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup services on shutdown"""
-    global chat_service
-    if chat_service:
-        try:
+    try:
+        global chat_service
+        if chat_service:
             chat_service.close()
-            logger.info("Services cleaned up successfully")
-        except Exception as e:
-            logger.error(f"Error cleaning up services: {str(e)}")
+            logger.info("Chat service closed")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {str(e)}")
 
-@app.get("/")
-async def root():
-    return {"message": "Welcome to the Tourism Data Chatbot API"}
-
-@app.post("/api/chat/message", response_model=ChatResponse)
-async def chat_message(message: ChatMessage) -> Dict[str, Any]:
-    """Handle chat messages"""
+@app.post("/chat")
+async def chat(request: ChatRequest) -> ChatResponse:
+    """Process chat messages"""
     try:
         if not chat_service:
-            raise HTTPException(status_code=500, detail="Chat service not initialized")
+            raise HTTPException(status_code=503, detail="Chat service not initialized")
+            
+        response = await chat_service.process_message(request.message)
+        return ChatResponse(**response)
         
-        response = await chat_service.process_message(message.content)
-        return response
     except Exception as e:
-        logger.error(f"Error processing chat message: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error processing chat request: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy"}
-
-@app.get("/api/schema")
-async def get_schema():
-    """Get database schema information"""
-    try:
-        if not chat_service:
-            raise HTTPException(status_code=500, detail="Chat service not initialized")
-        
-        schema_info = await chat_service.get_schema_info()
-        return {"success": True, "schema": schema_info}
-    except Exception as e:
-        logger.error(f"Error getting schema: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+    return {"status": "healthy"} 

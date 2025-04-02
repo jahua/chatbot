@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import logging
 import traceback
 import asyncio
@@ -11,6 +11,8 @@ from langchain.memory import ConversationBufferMemory
 from langchain_core.runnables import RunnablePassthrough
 from app.core.config import settings
 from sqlalchemy import create_engine, text
+from openai import AsyncOpenAI
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -21,7 +23,28 @@ load_dotenv()
 
 class OpenAIAdapter:
     def __init__(self):
-        """Initialize OpenAIAdapter with LangChain components"""
+        """Initialize OpenAI adapter with API configuration"""
+        self.client = AsyncOpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            base_url=settings.OPENAI_API_BASE
+        )
+        self.model_name = settings.OPENAI_MODEL
+        self.schema_info = """Tables:
+- data_lake.aoi_days_raw: Contains daily visitor data
+  * aoi_date (date): Date of visitor data
+  * visitors (JSONB): Contains 'swissTourist' and 'foreignTourist' counts
+
+- data_lake.master_card: Contains transaction data
+  * txn_date (date): Date of transaction
+  * industry (text): Industry sector
+  * segment (text): Market segment
+  * txn_amt (numeric): Transaction amount
+  * txn_cnt (numeric): Transaction count
+  * acct_cnt (numeric): Account count
+  * geo_type (text): Geographic type
+  * geo_name (text): Geographic name
+  * central_latitude (numeric): Location latitude
+  * central_longitude (numeric): Location longitude"""
         try:
             # Initialize OpenAI model
             self.llm = ChatOpenAI(
@@ -75,104 +98,95 @@ class OpenAIAdapter:
             logger.error(f"Error initializing OpenAIAdapter: {str(e)}")
             raise
     
-    async def generate_response(self, question: str, results=None) -> str:
-        """Generate a response using the OpenAI model"""
+    async def generate_response(self, question: str, data: str, chat_history: List[Dict[str, Any]] = None) -> str:
+        """Generate natural language response from data"""
         try:
-            # Get chat history
-            chat_history = self.memory.load_memory_variables({})["chat_history"]
-            
-            # Create a custom prompt based on whether we have query results
-            if results is not None:
-                # Create response prompt that includes the SQL results
-                response_prompt = ChatPromptTemplate.from_messages([
-                    ("system", """You are a helpful assistant specializing in tourism data analysis.
-                    You provide clear, concise, and informative interpretations of tourism data.
-                    The user has asked the following question, and we've retrieved data from our database.
-                    Please analyze this data and provide a comprehensive answer to the user's question.
-                    Include key trends, patterns, notable insights, and any relevant recommendations.
-                    Keep your response professional but conversational."""),
-                    MessagesPlaceholder(variable_name="chat_history"),
-                    ("human", f"""User Question: {question}
-                    
-                    Query Results:
-                    {results}
-                    
-                    Please provide a detailed analysis of this data in relation to the question.""")
-                ])
-                
-                # Create response chain
-                response_chain = response_prompt | self.llm | StrOutputParser()
-                
-                # Generate response with query results
-                response = await response_chain.ainvoke({
-                    "chat_history": chat_history
-                })
-            else:
-                # Generate regular response without query results
-                response = await self.chain.ainvoke({
-                    "question": question,
-                    "chat_history": chat_history
-                })
-            
-            # Update memory
-            self.memory.save_context({"question": question}, {"output": response})
-            
+            # Format chat history for context
+            history_context = ""
+            if chat_history:
+                history_context = "\nPrevious conversation:\n"
+                for msg in chat_history[-3:]:  # Use last 3 messages for context
+                    if msg["role"] == "user":
+                        history_context += f"User: {msg['content']}\n"
+                    else:
+                        history_context += f"Assistant: {msg['content']}\n"
+
+            # Create the prompt with data and chat history
+            prompt = f"""Given the following data:
+{data}
+
+And the user's question:
+{question}
+
+{history_context}
+
+Provide a detailed analysis of the data that answers the question. Your response should:
+1. Start with a clear overview of the key findings
+2. Include specific numbers and trends from the data
+3. Organize information with appropriate headings
+4. Provide insights and recommendations when relevant
+5. Use clear and professional language
+6. Maintain consistency with previous responses in the conversation
+
+Format your response using Markdown for better readability."""
+
+            # Get completion from OpenAI using the chain
+            response = await self.chain.ainvoke({
+                "question": prompt,
+                "chat_history": chat_history or []
+            })
             return response
-            
+
         except Exception as e:
             logger.error(f"Error generating response: {str(e)}")
             logger.error(traceback.format_exc())
-            raise
+            return None
 
-    async def generate_sql_query(self, message: str) -> str:
-        """Generate SQL query from natural language using OpenAI"""
+    async def generate_sql_query(self, question: str, chat_history: List[Dict[str, Any]] = None) -> str:
+        """Generate SQL query from natural language question"""
         try:
-            # Create a SQL-specific prompt template
-            sql_prompt = ChatPromptTemplate.from_messages([
-                ("system", """You are a helpful assistant that generates SQL queries for tourism data analysis.
-                You have access to the following tables:
-                - data_lake.aoi_days_raw: Contains daily visitor data with columns 'aoi_date' (for the date), 'visitors' (JSONB containing 'swissTourist' and 'foreignTourist')
-                - data_lake.master_card: Contains transaction data with columns:
-                  * 'txn_date' (date of transaction) - USE THIS INSTEAD OF 'transaction_date'
-                  * 'industry' (industry sector)
-                  * 'segment' (market segment)
-                  * 'txn_amt' (transaction amount) - USE THIS INSTEAD OF 'amount'
-                  * 'txn_cnt' (transaction count)
-                  * 'acct_cnt' (account count)
-                  * Geographic data: 'geo_type', 'geo_name', 'central_latitude', 'central_longitude'
-                
-                Generate ONLY THE SQL query without any explanation, markdown formatting, or backticks.
-                Use proper JSON field access with ->> for JSONB fields and cast numeric values appropriately.
-                IMPORTANT: 
-                - Use 'aoi_date' instead of 'date' for the date column in aoi_days_raw table.
-                - Use 'txn_date' instead of 'transaction_date' for the date column in master_card table.
-                - Use 'txn_amt' instead of 'amount' for the transaction amount in master_card table.
-                - When using ORDER BY with calculated columns, you must repeat the calculation in the ORDER BY clause rather than referring to the column alias.
-                - Example: Instead of 'ORDER BY total_visitors DESC', use 'ORDER BY SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) DESC'"""),
-                ("human", "{question}")
-            ])
-            
-            # Create a SQL generation chain
-            sql_chain = sql_prompt | self.llm | StrOutputParser()
-            
-            # Generate SQL query
-            sql_query = await sql_chain.ainvoke({"question": message})
-            
-            # Clean up the SQL query (remove markdown if present)
-            if "```" in sql_query:
-                # Extract SQL from markdown code block if present
-                import re
-                sql_query = re.search(r"```(?:sql)?(.*?)```", sql_query, re.DOTALL)
-                if sql_query:
-                    sql_query = sql_query.group(1).strip()
-            
-            logger.debug(f"Generated SQL query: {sql_query}")
+            # Format chat history for context
+            history_context = ""
+            if chat_history:
+                history_context = "\nPrevious conversation:\n"
+                for msg in chat_history[-3:]:  # Use last 3 messages for context
+                    if msg["role"] == "user":
+                        history_context += f"User: {msg['content']}\n"
+                    else:
+                        history_context += f"Assistant: {msg['content']}\n"
+
+            # Create the prompt with schema info and chat history
+            prompt = f"""Given the following database schema:
+{self.schema_info}
+
+And the following question:
+{question}
+
+{history_context}
+
+Generate a SQL query to answer this question. The query should:
+1. Be compatible with PostgreSQL
+2. Use the correct table and column names from the schema
+3. Include appropriate JOINs if needed
+4. Use aggregations (COUNT, SUM, AVG, etc.) when relevant
+5. Include WHERE clauses to filter data appropriately
+6. Order results in a meaningful way
+7. Limit results to a reasonable number if returning many rows
+
+Return ONLY the SQL query, without any explanation or comments."""
+
+            # Get completion from OpenAI using the chain
+            response = await self.chain.ainvoke({
+                "question": prompt,
+                "chat_history": chat_history or []
+            })
+            sql_query = response.strip()
             return sql_query
-            
+
         except Exception as e:
             logger.error(f"Error generating SQL query: {str(e)}")
             logger.error(traceback.format_exc())
-            raise
+            return None
 
     async def generate_sql(self, message: str, schema_context: str) -> str:
         """Generate SQL query from natural language using OpenAI"""
@@ -292,6 +306,58 @@ Keep the summary clear and informative for a business audience."""
         except Exception as e:
             logger.error(f"Error creating visualization: {str(e)}")
             raise
+
+    async def generate_visualization(self, data: List[Dict[str, Any]], question: str) -> Dict[str, Any]:
+        """Generate a visualization based on the data and question"""
+        try:
+            # Format chat history for context
+            chat_history = self._format_chat_history(chat_history)
+            
+            # Create prompt for visualization
+            prompt = f"""Based on the following data and question, create a visualization:
+
+Question: {question}
+
+Data: {json.dumps(data, indent=2)}
+
+Please create a visualization that best represents this data. Consider:
+1. The type of data (time series, categorical, numerical)
+2. The relationships between variables
+3. The key insights to highlight
+
+Return the visualization as a JSON object with the following structure:
+{{
+    "type": "line|bar|area|scatter|pie",
+    "data": {{
+        "x": [...],
+        "y": [...],
+        "labels": [...],
+        "title": "...",
+        "xaxis": "...",
+        "yaxis": "..."
+    }},
+    "layout": {{
+        "title": "...",
+        "xaxis": {{"title": "..."}},
+        "yaxis": {{"title": "..."}}
+    }}
+}}"""
+
+            # Generate visualization using the chain
+            response = await self.chain.ainvoke({"question": prompt, "chat_history": chat_history})
+            
+            # Parse the response
+            try:
+                visualization = json.loads(response)
+                return visualization
+            except json.JSONDecodeError:
+                logger.error("Failed to parse visualization JSON")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error generating visualization: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
 
 # Initialize OpenAI adapter
 openai_adapter = OpenAIAdapter() 

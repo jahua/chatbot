@@ -2,7 +2,7 @@ from sqlalchemy import create_engine, text, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from app.core.config import settings
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Generator
 import pandas as pd
 import logging
 import traceback
@@ -70,11 +70,28 @@ class DatabaseService:
         """Initialize database service"""
         logger.debug("Initializing DatabaseService")
         try:
-            self.engine = engine
-            self.session = SessionLocal()
-            logger.debug("Database session created successfully in DatabaseService")
+            # Create database engine
+            self.engine = create_engine('postgresql://postgres:336699@3.76.40.121:5432/trip_dw')
+            logger.debug("Created database engine")
+            
+            # Create session factory
+            self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+            logger.debug("Created session factory")
+            
         except Exception as e:
-            logger.error(f"Error creating database session in DatabaseService: {str(e)}")
+            logger.error(f"Error initializing database service: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    def execute_query(self, query: str) -> List[Dict[str, Any]]:
+        """Execute SQL query and return results as list of dictionaries"""
+        try:
+            with self.engine.connect() as connection:
+                result = connection.execute(text(query))
+                columns = result.keys()
+                return [dict(zip(columns, row)) for row in result]
+        except Exception as e:
+            logger.error(f"Error executing query: {str(e)}")
             logger.error(traceback.format_exc())
             raise
 
@@ -94,32 +111,14 @@ class DatabaseService:
             logger.error(traceback.format_exc())
             raise
 
-    async def execute_query(self, query: str) -> list:
-        """Execute a SQL query and return the results"""
-        logger.debug(f"Executing query: {query}")
-        try:
-            # Execute the query using SQLAlchemy text()
-            result = self.session.execute(text(query))
-            logger.debug("Query executed successfully")
-            
-            # Convert the result to a list of dictionaries
-            columns = result.keys()
-            data = []
-            for row in result:
-                row_dict = {}
-                for i, col in enumerate(columns):
-                    row_dict[col] = row[i]
-                data.append(row_dict)
-            
-            logger.debug(f"Query returned {len(data)} rows")
-            return data
-            
-        except Exception as e:
-            logger.error(f"Error executing query: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
-        finally:
-            logger.debug("Committing session after query execution")
-            self.session.commit()
+# Create a single instance of DatabaseService
+_db_service = None
+
+def get_db() -> DatabaseService:
+    """Get database service instance"""
+    global _db_service
+    if _db_service is None:
+        _db_service = DatabaseService()
+    return _db_service
 
 __all__ = ['engine', 'SessionLocal', 'get_db', 'DatabaseService'] 
