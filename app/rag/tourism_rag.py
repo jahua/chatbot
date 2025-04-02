@@ -57,22 +57,48 @@ class TourismRAG:
         
         # SQL generation prompt
         sql_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a SQL expert. Generate a PostgreSQL query to answer the user's question.
-            Use the provided schema context and previous conversation history.
+            ("system", """You are a SQL expert specializing in PostgreSQL with JSON handling.
+            Generate a SQL query to answer the user's question using the provided schema context.
+            
+            Key considerations:
+            1. Use proper JSON operators (->, ->>) for accessing JSON fields
+            2. Handle date ranges appropriately
+            3. Consider using window functions for time series analysis
+            4. Use appropriate aggregations for visitor counts
+            5. Join with master_card table when spending data is needed
+            
             Return ONLY the SQL query, nothing else."""),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{question}"),
             ("human", "Schema Context: {schema_context}")
         ])
         
-        # Analysis prompt
+        # Analysis and visualization prompt
         analysis_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a tourism data analyst. Analyze the query results and provide insights.
             Format your response in markdown with:
-            1. Key findings and trends
-            2. Notable patterns or anomalies
-            3. Relevant comparisons
-            4. Important metrics"""),
+            
+            1. Key Findings:
+               - Overall trends and patterns
+               - Notable changes or anomalies
+               - Peak periods or significant events
+            
+            2. Data Analysis:
+               - Statistical summaries
+               - Comparisons between categories
+               - Time series patterns
+            
+            3. Visualization Recommendations:
+               - Suggest appropriate chart types
+               - Specify key metrics to visualize
+               - Highlight important data points
+            
+            4. Business Insights:
+               - Impact on tourism operations
+               - Opportunities for improvement
+               - Recommendations for action
+            
+            Use clear, concise language and focus on actionable insights."""),
             ("human", "Question: {question}"),
             ("human", "SQL Query: {sql_query}"),
             ("human", "Results: {results}")
@@ -92,8 +118,40 @@ class TourismRAG:
     def _get_schema_context(self, question: str) -> str:
         """Retrieve relevant schema context for the question"""
         try:
+            # Get basic schema info from vector store
             schema_info = self.vector_store.get_schema_context(question)
-            return schema_info["context"]
+            
+            # Enhance schema context with table relationships and data types
+            enhanced_context = f"""
+            Database Schema:
+            
+            Table: data_lake.aoi_days_raw
+            - Primary key: (aoi_date, aoi_id)
+            - Contains daily visitor data with the following JSON fields:
+              * visitors: Breakdown of visitor types (swissTourist, foreignTourist, etc.)
+              * demographics: Age and gender distribution
+              * dwelltimes: Visitor duration statistics
+              * overnights_from_yesterday: Overnight visitor origins
+              * top_foreign_countries: Top visiting countries
+              * top_last_cantons: Previous day's canton origins
+              * top_last_municipalities: Previous day's municipality origins
+              * top_swiss_cantons: Swiss canton origins
+              * top_swiss_municipalities: Swiss municipality origins
+            
+            Table: data_lake.master_card
+            - Contains transaction data with visitor spending patterns
+            - Can be joined with aoi_days_raw on aoi_date and aoi_id
+            
+            Common Query Patterns:
+            1. Time-based analysis: Use aoi_date for temporal queries
+            2. Visitor segmentation: Use visitors JSON field for different visitor types
+            3. Geographic analysis: Use the various top_* fields for location-based queries
+            4. Spending analysis: Join with master_card for transaction data
+            
+            {schema_info['context']}
+            """
+            
+            return enhanced_context
         except Exception as e:
             logger.error(f"Error retrieving schema context: {str(e)}")
             return ""
@@ -106,14 +164,47 @@ class TourismRAG:
                 db=self.db,
                 prompt=sql_prompt
             )
-            return sql_chain.invoke({
+            
+            # Generate the query
+            query = sql_chain.invoke({
                 "question": question,
                 "schema_context": schema_context,
                 "chat_history": self.memory.chat_memory.messages
             })
+            
+            # Validate and optimize the query
+            optimized_query = self._optimize_query(query)
+            
+            return optimized_query
+            
         except Exception as e:
             logger.error(f"Error generating SQL: {str(e)}")
             raise
+    
+    def _optimize_query(self, query: str) -> str:
+        """Optimize the generated SQL query"""
+        try:
+            # Add common optimizations
+            optimized = query
+            
+            # Ensure proper JSON field access
+            optimized = optimized.replace("visitors->'swissTourist'", "(visitors->>'swissTourist')::numeric")
+            optimized = optimized.replace("visitors->'foreignTourist'", "(visitors->>'foreignTourist')::numeric")
+            
+            # Add appropriate indexes hint
+            if "aoi_date" in optimized and "aoi_id" in optimized:
+                optimized = optimized.replace("FROM data_lake.aoi_days_raw", 
+                                           "FROM data_lake.aoi_days_raw /*+ INDEX(ix_aoi_days_date_id) */")
+            
+            # Add LIMIT if missing for large result sets
+            if "LIMIT" not in optimized.upper() and "COUNT" not in optimized.upper():
+                optimized += "\nLIMIT 1000"
+            
+            return optimized
+            
+        except Exception as e:
+            logger.error(f"Error optimizing query: {str(e)}")
+            return query
     
     def _execute_sql(self, sql_query: str) -> str:
         """Execute SQL query and return results"""

@@ -2,14 +2,16 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from app.services.chat_service import ChatService
 from app.core.config import settings
-from app.models.chat import ChatMessage, ChatResponse
-from app.db.database import get_db, DatabaseService
+from app.schemas.chat import ChatMessage, ChatResponse
+from app.db.database import DatabaseService, SessionLocal, get_db
 from sqlalchemy.orm import Session
 import logging
 from typing import Dict, Any
+import traceback
+from pydantic import BaseModel
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -26,35 +28,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_chat_service(db: Session = Depends(get_db)) -> ChatService:
-    """Get ChatService instance with database session"""
+# Initialize services
+chat_service = None
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup"""
+    global chat_service
     try:
-        chat_service = ChatService(db)
-        return chat_service
+        chat_service = ChatService()
+        logger.info("Services initialized successfully")
     except Exception as e:
-        logger.error(f"Error initializing ChatService: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error initializing chat service: {str(e)}")
+        logger.error(f"Error initializing services: {str(e)}")
+        raise
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup services on shutdown"""
+    global chat_service
+    if chat_service:
+        try:
+            chat_service.close()
+            logger.info("Services cleaned up successfully")
+        except Exception as e:
+            logger.error(f"Error cleaning up services: {str(e)}")
 
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Tourism Data Chatbot API"}
 
-@app.post("/api/chat/message")
-async def process_message(
-    message: Dict[str, Any],
-    chat_service: ChatService = Depends(get_chat_service)
-) -> Dict[str, Any]:
-    """Process a chat message"""
+@app.post("/api/chat/message", response_model=ChatResponse)
+async def chat_message(message: ChatMessage) -> Dict[str, Any]:
+    """Handle chat messages"""
     try:
-        # Extract content from message
-        content = message.get("content", message.get("message", ""))
-        if not content:
-            raise HTTPException(status_code=400, detail="Message content is required")
-            
-        response = await chat_service.process_message(content)
+        if not chat_service:
+            raise HTTPException(status_code=500, detail="Chat service not initialized")
+        
+        response = await chat_service.process_message(message.content)
         return response
     except Exception as e:
-        logger.error(f"Error processing message: {str(e)}")
+        logger.error(f"Error processing chat message: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
@@ -63,11 +77,14 @@ async def health_check():
     return {"status": "healthy"}
 
 @app.get("/api/schema")
-async def get_schema(
-    chat_service: ChatService = Depends(get_chat_service)
-):
+async def get_schema():
+    """Get database schema information"""
     try:
-        schema_info = chat_service._load_schema_summary()
+        if not chat_service:
+            raise HTTPException(status_code=500, detail="Chat service not initialized")
+        
+        schema_info = await chat_service.get_schema_info()
         return {"success": True, "schema": schema_info}
     except Exception as e:
+        logger.error(f"Error getting schema: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

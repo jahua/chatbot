@@ -1,3 +1,3 @@
-from .chat import ChatMessageBase, ChatMessageCreate, ChatMessageResponse
+from .chat import ChatMessage, ChatResponse
 
-__all__ = ['ChatMessageBase', 'ChatMessageCreate', 'ChatMessageResponse'] 
+__all__ = ["ChatMessage", "ChatResponse"] 

@@ -41,10 +41,23 @@ class OpenAIAdapter:
             self.prompt = ChatPromptTemplate.from_messages([
                 ("system", """You are a helpful assistant that generates SQL queries for tourism data analysis.
                 You have access to the following tables:
-                - data_lake.aoi_days_raw: Contains daily visitor data
-                - data_lake.master_card: Contains transaction data
+                - data_lake.aoi_days_raw: Contains daily visitor data with columns 'aoi_date' (for the date), 'visitors' (JSONB containing 'swissTourist' and 'foreignTourist')
+                - data_lake.master_card: Contains transaction data with columns:
+                  * 'txn_date' (date of transaction) - USE THIS INSTEAD OF 'transaction_date'
+                  * 'industry' (industry sector)
+                  * 'segment' (market segment)
+                  * 'txn_amt' (transaction amount) - USE THIS INSTEAD OF 'amount'
+                  * 'txn_cnt' (transaction count)
+                  * 'acct_cnt' (account count)
+                  * Geographic data: 'geo_type', 'geo_name', 'central_latitude', 'central_longitude'
                 
-                Generate clear and efficient SQL queries to answer user questions about tourism patterns."""),
+                Generate clear and efficient SQL queries to answer user questions about tourism patterns.
+                IMPORTANT: 
+                - Use 'aoi_date' instead of 'date' for the date column in aoi_days_raw table.
+                - Use 'txn_date' instead of 'transaction_date' for the date column in master_card table.
+                - Use 'txn_amt' instead of 'amount' for the transaction amount in master_card table.
+                - When using ORDER BY with calculated columns, you must repeat the calculation in the ORDER BY clause rather than referring to the column alias.
+                - Example: Instead of 'ORDER BY total_visitors DESC', use 'ORDER BY SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) DESC'"""),
                 MessagesPlaceholder(variable_name="chat_history"),
                 ("human", "{question}")
             ])
@@ -62,17 +75,44 @@ class OpenAIAdapter:
             logger.error(f"Error initializing OpenAIAdapter: {str(e)}")
             raise
     
-    async def generate_response(self, question: str) -> str:
+    async def generate_response(self, question: str, results=None) -> str:
         """Generate a response using the OpenAI model"""
         try:
             # Get chat history
             chat_history = self.memory.load_memory_variables({})["chat_history"]
             
-            # Generate response
-            response = await self.chain.ainvoke({
-                "question": question,
-                "chat_history": chat_history
-            })
+            # Create a custom prompt based on whether we have query results
+            if results is not None:
+                # Create response prompt that includes the SQL results
+                response_prompt = ChatPromptTemplate.from_messages([
+                    ("system", """You are a helpful assistant specializing in tourism data analysis.
+                    You provide clear, concise, and informative interpretations of tourism data.
+                    The user has asked the following question, and we've retrieved data from our database.
+                    Please analyze this data and provide a comprehensive answer to the user's question.
+                    Include key trends, patterns, notable insights, and any relevant recommendations.
+                    Keep your response professional but conversational."""),
+                    MessagesPlaceholder(variable_name="chat_history"),
+                    ("human", f"""User Question: {question}
+                    
+                    Query Results:
+                    {results}
+                    
+                    Please provide a detailed analysis of this data in relation to the question.""")
+                ])
+                
+                # Create response chain
+                response_chain = response_prompt | self.llm | StrOutputParser()
+                
+                # Generate response with query results
+                response = await response_chain.ainvoke({
+                    "chat_history": chat_history
+                })
+            else:
+                # Generate regular response without query results
+                response = await self.chain.ainvoke({
+                    "question": question,
+                    "chat_history": chat_history
+                })
             
             # Update memory
             self.memory.save_context({"question": question}, {"output": response})
@@ -81,6 +121,57 @@ class OpenAIAdapter:
             
         except Exception as e:
             logger.error(f"Error generating response: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    async def generate_sql_query(self, message: str) -> str:
+        """Generate SQL query from natural language using OpenAI"""
+        try:
+            # Create a SQL-specific prompt template
+            sql_prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are a helpful assistant that generates SQL queries for tourism data analysis.
+                You have access to the following tables:
+                - data_lake.aoi_days_raw: Contains daily visitor data with columns 'aoi_date' (for the date), 'visitors' (JSONB containing 'swissTourist' and 'foreignTourist')
+                - data_lake.master_card: Contains transaction data with columns:
+                  * 'txn_date' (date of transaction) - USE THIS INSTEAD OF 'transaction_date'
+                  * 'industry' (industry sector)
+                  * 'segment' (market segment)
+                  * 'txn_amt' (transaction amount) - USE THIS INSTEAD OF 'amount'
+                  * 'txn_cnt' (transaction count)
+                  * 'acct_cnt' (account count)
+                  * Geographic data: 'geo_type', 'geo_name', 'central_latitude', 'central_longitude'
+                
+                Generate ONLY THE SQL query without any explanation, markdown formatting, or backticks.
+                Use proper JSON field access with ->> for JSONB fields and cast numeric values appropriately.
+                IMPORTANT: 
+                - Use 'aoi_date' instead of 'date' for the date column in aoi_days_raw table.
+                - Use 'txn_date' instead of 'transaction_date' for the date column in master_card table.
+                - Use 'txn_amt' instead of 'amount' for the transaction amount in master_card table.
+                - When using ORDER BY with calculated columns, you must repeat the calculation in the ORDER BY clause rather than referring to the column alias.
+                - Example: Instead of 'ORDER BY total_visitors DESC', use 'ORDER BY SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) DESC'"""),
+                ("human", "{question}")
+            ])
+            
+            # Create a SQL generation chain
+            sql_chain = sql_prompt | self.llm | StrOutputParser()
+            
+            # Generate SQL query
+            sql_query = await sql_chain.ainvoke({"question": message})
+            
+            # Clean up the SQL query (remove markdown if present)
+            if "```" in sql_query:
+                # Extract SQL from markdown code block if present
+                import re
+                sql_query = re.search(r"```(?:sql)?(.*?)```", sql_query, re.DOTALL)
+                if sql_query:
+                    sql_query = sql_query.group(1).strip()
+            
+            logger.debug(f"Generated SQL query: {sql_query}")
+            return sql_query
+            
+        except Exception as e:
+            logger.error(f"Error generating SQL query: {str(e)}")
+            logger.error(traceback.format_exc())
             raise
 
     async def generate_sql(self, message: str, schema_context: str) -> str:
@@ -116,6 +207,11 @@ Requirements:
 2. Cast numeric values appropriately
 3. Include proper GROUP BY clauses if using aggregations
 4. Order results logically
+5. IMPORTANT: Use 'aoi_date' instead of 'date' for the date column in aoi_days_raw table
+6. IMPORTANT: Use 'txn_date' instead of 'transaction_date' for the date column in master_card table
+7. IMPORTANT: Use 'txn_amt' instead of 'amount' for the transaction amount in master_card table
+8. IMPORTANT: When using ORDER BY with calculated columns, you must repeat the calculation in the ORDER BY clause rather than referring to the column alias
+   Example: Instead of 'ORDER BY total_visitors DESC', use 'ORDER BY SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) DESC'
 
 Return only the SQL query, no other text."""
 

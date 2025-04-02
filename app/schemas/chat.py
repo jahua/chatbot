@@ -1,20 +1,18 @@
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 
-class ChatMessageBase(BaseModel):
+class ChatMessage(BaseModel):
     content: str
-    role: str
-    model: Optional[str] = "claude"
+    role: Optional[str] = "user"
+    model: Optional[str] = "openai"
+    session_id: Optional[str] = None
 
-class ChatMessageCreate(ChatMessageBase):
-    pass
-
-class ChatMessageResponse(ChatMessageBase):
-    id: Optional[int] = None
-    created_at: Optional[datetime] = None
+class ChatResponse(BaseModel):
+    response: str
+    data: Optional[List[Dict[str, Any]]] = None
+    error: Optional[str] = None
     sql_query: Optional[str] = None
-    results: Optional[list] = None
     visualization: Optional[Dict[str, Any]] = None
 
     class Config:
