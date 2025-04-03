@@ -362,11 +362,37 @@ Ask questions about:
 with st.sidebar:
     st.markdown("### Example questions:")
     example_questions = [
-        "What day had the most visitors in 2023?",
-        "What are the weekly visitor patterns in spring 2023?",
-        "Show visitor counts for top 3 days in summer 2023",
-        "How do visitor patterns differ between domestic and international tourists?",
-        "What are the peak tourism periods in 2023?"
+        # Temporal Analysis
+        "What are the peak hours for tourist activity on weekends?",
+        "Show me the daily visitor trend during Christmas week 2023",
+        
+        # Comparative Analysis
+        "Compare tourist numbers between summer and winter seasons",
+        "How does tourist spending vary between Swiss and foreign visitors?",
+        
+        # Regional Analysis
+        "Which regions had the highest growth in tourism in 2023?",
+        "Show me the most popular tourist destinations by visitor count",
+        
+        # Demographic Analysis
+        "What's the age distribution of tourists during peak seasons?",
+        "Compare visitor demographics between urban and rural areas",
+        
+        # Event Impact Analysis
+        "How did major festivals affect local tourism numbers?",
+        "What was the tourism impact of the Montreux Jazz Festival?",
+        
+        # Economic Analysis
+        "What's the average tourist spending per day in different regions?",
+        "Show me the correlation between hotel prices and visitor numbers",
+        
+        # Transportation Analysis
+        "Which transportation methods are most used by tourists?",
+        "How do visitor numbers correlate with public transport usage?",
+        
+        # Weather Impact
+        "How does weather affect tourist numbers in mountain regions?",
+        "Compare visitor patterns between sunny and rainy days"
     ]
     
     for q in example_questions:
