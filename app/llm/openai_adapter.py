@@ -50,7 +50,7 @@ class OpenAIAdapter:
             self.llm = ChatOpenAI(
                 model=settings.OPENAI_MODEL,
                 openai_api_key=settings.OPENAI_API_KEY,
-                openai_api_base="http://oapi.aivue.cn/v1",  # Base URL with /v1
+                openai_api_base=settings.OPENAI_API_BASE,  # Base URL with /v1
                 temperature=0.7
             )
             
