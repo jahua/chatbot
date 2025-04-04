@@ -10,10 +10,12 @@ class ChatRequest(BaseModel):
     message: str
 
 class ChatResponse(BaseModel):
-    response: str
+    message_id: str
+    content: str
+    sql_query: Optional[str] = None
     visualization: Optional[str] = None
-    query: Optional[str] = None
-    success: bool = True
+    status: str = "success"
+    response: Optional[str] = ""
 
     class Config:
         from_attributes = True 

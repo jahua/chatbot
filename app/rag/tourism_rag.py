@@ -9,16 +9,13 @@ from langchain_community.utilities import SQLDatabase
 from langchain.chains import create_sql_query_chain
 from langchain.memory import ConversationBufferMemory
 from app.core.config import settings
-from app.db.vector_store import VectorStore
+from app.db.schema_manager import schema_manager
 import logging
 
 logger = logging.getLogger(__name__)
 
 class TourismRAG:
     def __init__(self):
-        # Initialize vector store
-        self.vector_store = VectorStore()
-        
         # Initialize embeddings
         self.embeddings = OpenAIEmbeddings(
             openai_api_key=settings.OPENAI_API_KEY,
@@ -44,17 +41,6 @@ class TourismRAG:
     def _initialize_chains(self):
         """Initialize LangChain chains for the RAG pipeline"""
         
-        # Schema retrieval prompt
-        schema_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a database schema expert. Given the user's question, 
-            identify the relevant tables and columns needed to answer it.
-            Return a JSON object with:
-            - tables: List of relevant table names
-            - columns: List of relevant column names
-            - relationships: List of relevant relationships between tables"""),
-            ("human", "{question}")
-        ])
-        
         # SQL generation prompt
         sql_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a SQL expert specializing in PostgreSQL with JSON handling.
@@ -66,6 +52,11 @@ class TourismRAG:
             3. Consider using window functions for time series analysis
             4. Use appropriate aggregations for visitor counts
             5. Join with master_card table when spending data is needed
+            
+            The schema context includes:
+            - Table descriptions and their relationships
+            - JSON field structures and their meanings
+            - Common query patterns for different analysis types
             
             Return ONLY the SQL query, nothing else."""),
             MessagesPlaceholder(variable_name="chat_history"),
@@ -118,40 +109,35 @@ class TourismRAG:
     def _get_schema_context(self, question: str) -> str:
         """Retrieve relevant schema context for the question"""
         try:
-            # Get basic schema info from vector store
-            schema_info = self.vector_store.get_schema_context(question)
+            # Get schema context from schema manager
+            context = schema_manager.get_relevant_context(question)
             
-            # Enhance schema context with table relationships and data types
-            enhanced_context = f"""
-            Database Schema:
+            # Format the context for SQL generation
+            formatted_context = []
             
-            Table: data_lake.aoi_days_raw
-            - Primary key: (aoi_date, aoi_id)
-            - Contains daily visitor data with the following JSON fields:
-              * visitors: Breakdown of visitor types (swissTourist, foreignTourist, etc.)
-              * demographics: Age and gender distribution
-              * dwelltimes: Visitor duration statistics
-              * overnights_from_yesterday: Overnight visitor origins
-              * top_foreign_countries: Top visiting countries
-              * top_last_cantons: Previous day's canton origins
-              * top_last_municipalities: Previous day's municipality origins
-              * top_swiss_cantons: Swiss canton origins
-              * top_swiss_municipalities: Swiss municipality origins
+            # Add table descriptions and columns
+            for table_name, table_info in context["tables"].items():
+                formatted_context.append(f"\nTable: {table_name}")
+                if "description" in table_info:
+                    formatted_context.append(f"Description: {table_info['description']}")
+                if "columns" in table_info:
+                    formatted_context.append("Columns:")
+                    formatted_context.extend([f"- {col}" for col in table_info["columns"]])
             
-            Table: data_lake.master_card
-            - Contains transaction data with visitor spending patterns
-            - Can be joined with aoi_days_raw on aoi_date and aoi_id
+            # Add JSON field information
+            if context["json_fields"]:
+                formatted_context.append("\nJSON Fields:")
+                for field_key, field_info in context["json_fields"].items():
+                    formatted_context.append(f"\n{field_key}:")
+                    formatted_context.extend([f"- {info}" for info in field_info])
             
-            Common Query Patterns:
-            1. Time-based analysis: Use aoi_date for temporal queries
-            2. Visitor segmentation: Use visitors JSON field for different visitor types
-            3. Geographic analysis: Use the various top_* fields for location-based queries
-            4. Spending analysis: Join with master_card for transaction data
+            # Add query patterns
+            if context["query_patterns"]:
+                formatted_context.append("\nRelevant Query Patterns:")
+                formatted_context.extend([f"- {pattern}" for pattern in context["query_patterns"]])
             
-            {schema_info['context']}
-            """
+            return "\n".join(formatted_context)
             
-            return enhanced_context
         except Exception as e:
             logger.error(f"Error retrieving schema context: {str(e)}")
             return ""
@@ -187,9 +173,18 @@ class TourismRAG:
             # Add common optimizations
             optimized = query
             
-            # Ensure proper JSON field access
-            optimized = optimized.replace("visitors->'swissTourist'", "(visitors->>'swissTourist')::numeric")
-            optimized = optimized.replace("visitors->'foreignTourist'", "(visitors->>'foreignTourist')::numeric")
+            # Ensure proper JSON field access and type casting
+            json_fields = {
+                "visitors": ["swissLocal", "swissTourist", "foreignWorker", "swissCommuter", "foreignTourist"],
+                "demographics": ["maleProportion", "ageDistribution"],
+                "top_foreign_countries": ["name", "visitors"]
+            }
+            
+            for field, subfields in json_fields.items():
+                for subfield in subfields:
+                    old_pattern = f"{field}->'{subfield}'"
+                    new_pattern = f"({field}->>''{subfield}'')::numeric"
+                    optimized = optimized.replace(old_pattern, new_pattern)
             
             # Add appropriate indexes hint
             if "aoi_date" in optimized and "aoi_id" in optimized:

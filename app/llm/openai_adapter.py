@@ -5,13 +5,14 @@ import asyncio
 import os
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain_core.output_parsers import StrOutputParser
+from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
 from langchain_core.runnables import RunnablePassthrough
 from app.core.config import settings
 from sqlalchemy import create_engine, text
 from openai import AsyncOpenAI
+from app.db.schema_manager import schema_manager
 import json
 
 # Configure logging
@@ -22,119 +23,223 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 class OpenAIAdapter:
-    def __init__(self):
-        """Initialize OpenAI adapter with API configuration"""
-        self.client = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE
-        )
-        self.model_name = settings.OPENAI_MODEL
-        self.schema_info = """Tables:
-- data_lake.aoi_days_raw: Contains daily visitor data
-  * aoi_date (date): Date of visitor data
-  * visitors (JSONB): Contains 'swissTourist' and 'foreignTourist' counts
-
-- data_lake.master_card: Contains transaction data
-  * txn_date (date): Date of transaction
-  * industry (text): Industry sector
-  * segment (text): Market segment
-  * txn_amt (numeric): Transaction amount
-  * txn_cnt (numeric): Transaction count
-  * acct_cnt (numeric): Account count
-  * geo_type (text): Geographic type
-  * geo_name (text): Geographic name
-  * central_latitude (numeric): Location latitude
-  * central_longitude (numeric): Location longitude"""
-        try:
-            # Initialize OpenAI model
-            self.llm = ChatOpenAI(
-                model=settings.OPENAI_MODEL,
-                openai_api_key=settings.OPENAI_API_KEY,
-                openai_api_base=settings.OPENAI_API_BASE,  # Base URL with /v1
-                temperature=0.7
-            )
-            
-            # Initialize memory
-            self.memory = ConversationBufferMemory(
-                return_messages=True,
-                memory_key="chat_history"
-            )
-            
-            # Initialize prompt template
-            self.prompt = ChatPromptTemplate.from_messages([
-                ("system", """You are a helpful assistant that generates SQL queries for tourism data analysis.
-                You have access to the following tables:
-                - data_lake.aoi_days_raw: Contains daily visitor data with columns 'aoi_date' (for the date), 'visitors' (JSONB containing 'swissTourist' and 'foreignTourist')
-                - data_lake.master_card: Contains transaction data with columns:
-                  * 'txn_date' (date of transaction) - USE THIS INSTEAD OF 'transaction_date'
-                  * 'industry' (industry sector)
-                  * 'segment' (market segment)
-                  * 'txn_amt' (transaction amount) - USE THIS INSTEAD OF 'amount'
-                  * 'txn_cnt' (transaction count)
-                  * 'acct_cnt' (account count)
-                  * Geographic data: 'geo_type', 'geo_name', 'central_latitude', 'central_longitude'
-                
-                Generate clear and efficient SQL queries to answer user questions about tourism patterns.
-                IMPORTANT: 
-                - Use 'aoi_date' instead of 'date' for the date column in aoi_days_raw table.
-                - Use 'txn_date' instead of 'transaction_date' for the date column in master_card table.
-                - Use 'txn_amt' instead of 'amount' for the transaction amount in master_card table.
-                - When using ORDER BY with calculated columns, you must repeat the calculation in the ORDER BY clause rather than referring to the column alias.
-                - Example: Instead of 'ORDER BY total_visitors DESC', use 'ORDER BY SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) DESC'"""),
-                MessagesPlaceholder(variable_name="chat_history"),
-                ("human", "{question}")
-            ])
-            
-            # Create the chain
-            self.chain = (
-                self.prompt
-                | self.llm
-                | StrOutputParser()
-            )
-            
-            logger.info("OpenAIAdapter initialized successfully using LCEL")
-            
-        except Exception as e:
-            logger.error(f"Error initializing OpenAIAdapter: {str(e)}")
-            raise
+    """Adapter for OpenAI API interactions"""
     
-    async def generate_response(self, question: str, data: str, chat_history: List[Dict[str, Any]] = None) -> str:
-        """Generate natural language response from data"""
+    def __init__(self, api_key: Optional[str] = None, api_base: Optional[str] = None):
+        """Initialize OpenAI adapter with API configuration"""
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_base = api_base or os.getenv("OPENAI_API_BASE")
+        
+        if not self.api_key:
+            raise ValueError("OpenAI API key is required")
+            
+        # Initialize OpenAI client
+        self.client = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.api_base
+        )
+        
+        # Initialize LangChain chat model
+        self.chat_model = ChatOpenAI(
+            api_key=self.api_key,
+            model_name="gpt-3.5-turbo",
+            model_kwargs={"api_base": self.api_base}
+        )
+        
+        # Initialize memory and prompts
+        self.memory = ConversationBufferMemory(
+            return_messages=True,
+            memory_key="chat_history"
+        )
+        self._initialize_prompts()
+            
+    def _initialize_prompts(self):
+        """Initialize prompt templates with intelligent schema context"""
+        # SQL generation prompt with dynamic schema context
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a helpful assistant that generates SQL queries for tourism data analysis.
+            You have access to a dynamic schema context that will be provided for each query.
+            
+            The data comes from two main sources:
+            1. Swisscom Tourism API - Provides visitor data based on SIM card movements
+            2. Mastercard Geo Insights - Provides spending patterns in 1.2x1.2km tiles
+            
+            Key guidelines for query generation:
+            1. Use proper JSON operators (->, ->>) for JSONB fields
+            2. Cast numeric values appropriately using ::numeric
+            3. Use proper date handling functions
+            4. Consider table relationships and join conditions
+            5. Use appropriate indexes when available
+            6. Handle aggregations and grouping correctly
+            
+            Special considerations:
+            1. Visitor categories are based on >30 min dwell time
+            2. Overnight visitors spend 4+ hours between 00:00-05:00
+            3. Previous locations require 20+ min stay before arrival
+            4. Mastercard data is indexed to 2018 baseline
+            5. Geographic analysis may require spatial functions
+            
+            IMPORTANT NAMING CONVENTIONS:
+            - Use 'aoi_date' for dates in aoi_days_raw table
+            - Use 'txn_date' for dates in master_card table
+            - Use 'txn_amt' for transaction amounts
+            
+            When using ORDER BY with calculated columns, repeat the calculation instead of using column alias."""),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{question}"),
+            ("human", "Schema Context: {schema_context}")
+        ])
+        
+        # Analysis prompt for query results
+        self.analysis_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a tourism data analyst. Analyze the query results using the schema context.
+            Consider:
+            1. Visitor Patterns:
+               - Swiss vs foreign visitors
+               - Local vs tourist proportions
+               - Commuter patterns
+               - Overnight stays (4+ hours, 00:00-05:00)
+            
+            2. Temporal Patterns:
+               - Daily/weekly trends
+               - Seasonal variations
+               - Peak periods
+               - Dwell time distributions
+            
+            3. Geographic Insights:
+               - Origin analysis (municipalities, cantons, countries)
+               - Previous location patterns
+               - Regional differences
+               - Spatial correlations
+            
+            4. Demographic Analysis:
+               - Age group distributions
+               - Gender proportions
+               - Visitor segment characteristics
+            
+            5. Economic Impact:
+               - Spending patterns by industry
+               - Domestic vs international transactions
+               - Average transaction metrics
+               - Geographic spending distribution
+            
+            Format your response in markdown with clear sections and insights."""),
+            ("human", "Question: {question}"),
+            ("human", "Schema Context: {schema_context}"),
+            ("human", "Results: {results}")
+        ])
+
+    async def generate_sql_query(self, question: str, chat_history: List[Dict[str, Any]] = None) -> str:
+        """Generate SQL query with intelligent schema context"""
         try:
-            # Format chat history for context
-            history_context = ""
-            if chat_history:
-                history_context = "\nPrevious conversation:\n"
-                for msg in chat_history[-3:]:  # Use last 3 messages for context
-                    if msg["role"] == "user":
-                        history_context += f"User: {msg['content']}\n"
-                    else:
-                        history_context += f"Assistant: {msg['content']}\n"
-
-            # Create the prompt with data and chat history
-            prompt = f"""Given the following data:
-{data}
-
-And the user's question:
-{question}
-
-{history_context}
-
-Provide a detailed analysis of the data that answers the question. Your response should:
-1. Start with a clear overview of the key findings
-2. Include specific numbers and trends from the data
-3. Organize information with appropriate headings
-4. Provide insights and recommendations when relevant
-5. Use clear and professional language
-6. Maintain consistency with previous responses in the conversation
-
-Format your response using Markdown for better readability."""
-
-            # Get completion from OpenAI using the chain
-            response = await self.chain.ainvoke({
-                "question": prompt,
+            # Get relevant schema context for the question
+            schema_context = schema_manager.get_relevant_context(question)
+            
+            # Format schema context for the prompt
+            formatted_context = self._format_schema_context(schema_context)
+            
+            # Generate SQL query
+            sql_query = await self.chain.ainvoke({
+                "question": question,
+                "schema_context": formatted_context,
                 "chat_history": chat_history or []
             })
+            
+            # Optimize the query
+            optimized_query = self._optimize_query(sql_query, schema_context)
+            
+            return optimized_query
+
+        except Exception as e:
+            logger.error(f"Error generating SQL query: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+    def _format_schema_context(self, context: Dict[str, Any]) -> str:
+        """Format schema context for prompt consumption"""
+        formatted = []
+        
+        # Add domain knowledge
+        if context["domain_knowledge"]:
+            formatted.append("\nDomain Knowledge:")
+            for category, info_list in context["domain_knowledge"].items():
+                formatted.append(f"\n{category.replace('_', ' ').title()}:")
+                formatted.extend([f"- {info}" for info in info_list])
+        
+        # Add table information
+        for table_name, table_info in context["tables"].items():
+            formatted.append(f"\nTable: {table_name}")
+            if "description" in table_info:
+                formatted.append(f"Description: {table_info['description']}")
+            if "columns" in table_info:
+                formatted.append("Columns:")
+                formatted.extend([f"- {col}" for col in table_info["columns"]])
+        
+        # Add JSON field details
+        if context["json_fields"]:
+            formatted.append("\nJSON Fields:")
+            for field_key, field_info in context["json_fields"].items():
+                formatted.append(f"\n{field_key}:")
+                formatted.extend([f"- {info}" for info in field_info])
+        
+        # Add relevant query patterns
+        if context["query_patterns"]:
+            formatted.append("\nRelevant Query Patterns:")
+            formatted.extend([f"- {pattern}" for pattern in context["query_patterns"]])
+        
+        return "\n".join(formatted)
+    
+    def _optimize_query(self, query: str, schema_context: Dict[str, Any]) -> str:
+        """Optimize SQL query using schema context"""
+        try:
+            optimized = query
+            
+            # Get JSON field information from schema context
+            json_fields = {}
+            for table_info in schema_context["tables"].values():
+                for col_name, col_info in table_info.get("columns", {}).items():
+                    if col_info.get("type") == "jsonb" and isinstance(col_info.get("json_structure"), dict):
+                        json_fields[col_name] = list(col_info["json_structure"].keys())
+            
+            # Ensure proper JSON field access and type casting
+            for field, subfields in json_fields.items():
+                for subfield in subfields:
+                    old_pattern = f"{field}->'{subfield}'"
+                    new_pattern = f"({field}->>''{subfield}'')::numeric"
+                    optimized = optimized.replace(old_pattern, new_pattern)
+            
+            # Add index hints based on schema context
+            if "aoi_date" in optimized and "aoi_id" in optimized:
+                optimized = optimized.replace(
+                    "FROM data_lake.aoi_days_raw",
+                    "FROM data_lake.aoi_days_raw /*+ INDEX(ix_aoi_days_date_id) */"
+                )
+            
+            # Add LIMIT for large result sets
+            if "LIMIT" not in optimized.upper() and "COUNT" not in optimized.upper():
+                optimized += "\nLIMIT 1000"
+            
+            return optimized
+
+        except Exception as e:
+            logger.error(f"Error optimizing query: {str(e)}")
+            return query
+    
+    async def generate_response(self, question: str, data: str, chat_history: List[Dict[str, Any]] = None) -> str:
+        """Generate response with schema-aware analysis"""
+        try:
+            # Get relevant schema context
+            schema_context = schema_manager.get_relevant_context(question)
+            formatted_context = self._format_schema_context(schema_context)
+            
+            # Create analysis prompt with schema context
+            response = await self.chain.ainvoke({
+                "question": question,
+                "schema_context": formatted_context,
+                "results": data,
+                "chat_history": chat_history or []
+            })
+            
             return response
 
         except Exception as e:
@@ -142,211 +247,37 @@ Format your response using Markdown for better readability."""
             logger.error(traceback.format_exc())
             return None
 
-    async def generate_sql_query(self, question: str, chat_history: List[Dict[str, Any]] = None) -> str:
-        """Generate SQL query from natural language question"""
+    async def generate_visualization(self, data: List[Dict[str, Any]], question: str) -> Dict[str, Any]:
+        """Generate visualization with schema context awareness"""
         try:
-            # Format chat history for context
-            history_context = ""
-            if chat_history:
-                history_context = "\nPrevious conversation:\n"
-                for msg in chat_history[-3:]:  # Use last 3 messages for context
-                    if msg["role"] == "user":
-                        history_context += f"User: {msg['content']}\n"
-                    else:
-                        history_context += f"Assistant: {msg['content']}\n"
-
-            # Create the prompt with schema info and chat history
-            prompt = f"""Given the following database schema:
-{self.schema_info}
-
-And the following question:
-{question}
-
-{history_context}
-
-Generate a SQL query to answer this question. The query should:
-1. Be compatible with PostgreSQL
-2. Use the correct table and column names from the schema
-3. Include appropriate JOINs if needed
-4. Use aggregations (COUNT, SUM, AVG, etc.) when relevant
-5. Include WHERE clauses to filter data appropriately
-6. Order results in a meaningful way
-7. Limit results to a reasonable number if returning many rows
-
-Return ONLY the SQL query, without any explanation or comments."""
-
-            # Get completion from OpenAI using the chain
-            response = await self.chain.ainvoke({
-                "question": prompt,
-                "chat_history": chat_history or []
-            })
-            sql_query = response.strip()
-            return sql_query
-
-        except Exception as e:
-            logger.error(f"Error generating SQL query: {str(e)}")
-            logger.error(traceback.format_exc())
-            return None
-
-    async def generate_sql(self, message: str, schema_context: str) -> str:
-        """Generate SQL query from natural language using OpenAI"""
-        try:
-            # Check for common patterns first
-            if "weekly visitor patterns" in message.lower():
-                logger.debug("Using predefined weekly pattern query")
-                if "spring" in message.lower():
-                    return """
-                    SELECT
-                        EXTRACT(WEEK FROM aoi_date) as week_number,
-                        ROUND(AVG((visitors->>'swissTourist')::numeric)) as swiss_tourists,
-                        ROUND(AVG((visitors->>'foreignTourist')::numeric)) as foreign_tourists,
-                        ROUND(AVG((visitors->>'swissTourist')::numeric + (visitors->>'foreignTourist')::numeric)) as total_visitors
-                    FROM data_lake.aoi_days_raw
-                    WHERE
-                        EXTRACT(YEAR FROM aoi_date) = 2023
-                        AND EXTRACT(MONTH FROM aoi_date) BETWEEN 3 AND 5
-                    GROUP BY week_number
-                    ORDER BY week_number;
-                    """
-
-            prompt = f"""Given the following database schema and user message, generate a PostgreSQL query.
+            # Get schema context for visualization guidance
+            schema_context = schema_manager.get_relevant_context(question)
+            
+            # Create visualization prompt
+            prompt = f"""Based on the schema context and data, create an appropriate visualization:
 
 Schema Context:
-{schema_context}
-
-User Query: {message}
-
-Requirements:
-1. Use proper JSON field access with ->> for JSONB fields
-2. Cast numeric values appropriately
-3. Include proper GROUP BY clauses if using aggregations
-4. Order results logically
-5. IMPORTANT: Use 'aoi_date' instead of 'date' for the date column in aoi_days_raw table
-6. IMPORTANT: Use 'txn_date' instead of 'transaction_date' for the date column in master_card table
-7. IMPORTANT: Use 'txn_amt' instead of 'amount' for the transaction amount in master_card table
-8. IMPORTANT: When using ORDER BY with calculated columns, you must repeat the calculation in the ORDER BY clause rather than referring to the column alias
-   Example: Instead of 'ORDER BY total_visitors DESC', use 'ORDER BY SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) DESC'
-
-Return only the SQL query, no other text."""
-
-            response = self.llm.invoke(prompt)
-            sql_query = response.strip()
-            logger.debug(f"Generated SQL: {sql_query}")
-            return sql_query
-
-        except Exception as e:
-            logger.error(f"Error generating SQL: {str(e)}")
-            raise
-
-    async def execute_sql(self, sql_query: str) -> Any:
-        """Execute SQL query using database connection"""
-        try:
-            # Use the database connection from settings
-            engine = create_engine(f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
-            with engine.connect() as connection:
-                result = connection.execute(text(sql_query))
-                return result.fetchall()
-        except Exception as e:
-            logger.error(f"Error executing SQL: {str(e)}")
-            raise
-
-    async def summarize_data(self, data: list, query_context: str) -> str:
-        """Generate a summary of the data using the OpenAI model"""
-        try:
-            prompt = f"""Given the following data from a tourism database query about {query_context}, provide a clear and concise summary of the patterns and insights:
-
-Data:
-{data}
-
-Please include:
-1. Overall trends
-2. Notable patterns or changes
-3. Peak periods
-4. Any interesting insights
-
-Keep the summary clear and informative for a business audience."""
-
-            response = await self.chain.ainvoke({
-                "question": prompt,
-                "chat_history": []
-            })
-            
-            return response
-
-        except Exception as e:
-            logger.error(f"Error generating data summary: {str(e)}")
-            raise
-
-    def visualize_data(self, data: list, columns: list) -> dict:
-        """Create visualization data for the frontend"""
-        try:
-            import pandas as pd
-            
-            # Convert data to DataFrame
-            df = pd.DataFrame(data, columns=columns)
-            
-            # Prepare visualization data
-            viz_data = {
-                'type': 'line',  # Default to line chart for time series
-                'data': {
-                    'labels': df[columns[0]].tolist(),  # First column as labels (usually dates)
-                    'datasets': []
-                }
-            }
-            
-            # Add each numeric column as a dataset
-            for col in columns[1:]:
-                viz_data['data']['datasets'].append({
-                    'label': col,
-                    'data': df[col].tolist()
-                })
-            
-            return viz_data
-
-        except Exception as e:
-            logger.error(f"Error creating visualization: {str(e)}")
-            raise
-
-    async def generate_visualization(self, data: List[Dict[str, Any]], question: str) -> Dict[str, Any]:
-        """Generate a visualization based on the data and question"""
-        try:
-            # Format chat history for context
-            chat_history = self._format_chat_history(chat_history)
-            
-            # Create prompt for visualization
-            prompt = f"""Based on the following data and question, create a visualization:
+{self._format_schema_context(schema_context)}
 
 Question: {question}
 
 Data: {json.dumps(data, indent=2)}
 
-Please create a visualization that best represents this data. Consider:
-1. The type of data (time series, categorical, numerical)
-2. The relationships between variables
-3. The key insights to highlight
+Consider:
+1. The data structure and relationships
+2. Appropriate visualization types for the data
+3. Key metrics and dimensions to highlight
+4. Time series patterns if relevant
+5. Geographic visualizations if location data is present
 
-Return the visualization as a JSON object with the following structure:
-{{
-    "type": "line|bar|area|scatter|pie",
-    "data": {{
-        "x": [...],
-        "y": [...],
-        "labels": [...],
-        "title": "...",
-        "xaxis": "...",
-        "yaxis": "..."
-    }},
-    "layout": {{
-        "title": "...",
-        "xaxis": {{"title": "..."}},
-        "yaxis": {{"title": "..."}}
-    }}
-}}"""
+Return a visualization configuration as JSON."""
 
             # Generate visualization using the chain
-            response = await self.chain.ainvoke({"question": prompt, "chat_history": chat_history})
+            response = await self.chain.ainvoke({
+                "question": prompt,
+                "chat_history": []
+            })
             
-            # Parse the response
             try:
                 visualization = json.loads(response)
                 return visualization
@@ -358,6 +289,14 @@ Return the visualization as a JSON object with the following structure:
             logger.error(f"Error generating visualization: {str(e)}")
             logger.error(traceback.format_exc())
             return None
+
+    async def close(self):
+        """Cleanup resources"""
+        if hasattr(self, 'client'):
+            await self.client.close()
+        if hasattr(self, 'chat_model'):
+            await self.chat_model.aclose()
+        logger.info("OpenAIAdapter closed successfully")
 
 # Initialize OpenAI adapter
 openai_adapter = OpenAIAdapter() 

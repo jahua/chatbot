@@ -10,6 +10,47 @@ def generate_sql_query(message: str) -> str:
         # Convert message to lowercase for easier matching
         message = message.lower()
         
+        # Check for spending pattern queries
+        if any(word in message for word in ["spending", "transaction", "purchase", "industry", "industries"]):
+            if "by industry" in message or "across industries" in message or "industry breakdown" in message:
+                return """
+                    SELECT 
+                        industry,
+                        SUM(txn_amt::numeric) as total_amount,
+                        SUM(txn_cnt::numeric) as total_transactions,
+                        AVG(txn_amt::numeric) as avg_transaction_amount
+                    FROM data_lake.master_card
+                    GROUP BY industry
+                    ORDER BY total_amount DESC
+                    LIMIT 15;  /* Limit results for performance */
+                """
+            elif "daily" in message or "by day" in message:
+                return """
+                    SELECT 
+                        txn_date,
+                        industry,
+                        SUM(txn_amt::numeric) as total_amount,
+                        SUM(txn_cnt::numeric) as total_transactions
+                    FROM data_lake.master_card
+                    WHERE txn_date >= CURRENT_DATE - INTERVAL '30 days'  /* Add time window */
+                    GROUP BY txn_date, industry
+                    ORDER BY txn_date DESC, total_amount DESC
+                    LIMIT 100;  /* Limit results */
+                """
+            else:
+                return """
+                    SELECT 
+                        industry,
+                        SUM(txn_amt::numeric) as total_amount,
+                        SUM(txn_cnt::numeric) as total_transactions,
+                        AVG(txn_amt::numeric) as avg_transaction_amount,
+                        COUNT(DISTINCT geo_name) as unique_locations
+                    FROM data_lake.master_card
+                    GROUP BY industry
+                    ORDER BY total_amount DESC
+                    LIMIT 15;  /* Limit results for performance */
+                """
+        
         # Check for specific date queries
         if "day" in message and "most visitors" in message and "2023" in message:
             return """

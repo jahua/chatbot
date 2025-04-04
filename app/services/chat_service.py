@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.db.database import SessionLocal, DatabaseService, get_db
 from app.llm.openai_adapter import OpenAIAdapter
 from app.schemas.chat import ChatMessage, ChatResponse
+from app.db.schema_manager import SchemaManager
 from sqlalchemy import text
 import pandas as pd
 import logging
@@ -22,16 +23,17 @@ import psycopg2
 import plotly.graph_objects as go
 from app.utils.visualization import create_visualization, figure_to_base64
 from app.utils.sql_generator import generate_sql_query
-from app.utils.analysis_generator import generate_analysis_summary
+from app.utils.analysis_generator import generate_analysis_summary, format_results_as_markdown_table
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class ChatService:
-    def __init__(self, openai_adapter: OpenAIAdapter, db: DatabaseService):
-        """Initialize chat service with OpenAI adapter and database connection"""
-        self.openai_adapter = openai_adapter
+    def __init__(self, db: DatabaseService, openai_adapter: OpenAIAdapter, schema_manager: SchemaManager):
+        """Initialize chat service with dependencies"""
         self.db = db
+        self.openai_adapter = openai_adapter
+        self.schema_manager = schema_manager
         logger.info("ChatService initialized successfully")
 
     def is_conversational_message(self, message: str) -> bool:
@@ -148,62 +150,103 @@ class ChatService:
             logger.error(traceback.format_exc())
             return "I can help you analyze tourism data including visitor statistics and transaction data. Please ask a specific question about tourism patterns."
     
-    async def process_message(self, message: str) -> Dict[str, Any]:
-        """Process user message and return response with analysis"""
+    async def process_message(self, message: str) -> ChatResponse:
+        """Process incoming chat message"""
         try:
+            # Initialize response
+            response = ChatResponse(
+                message_id=str(uuid.uuid4()),
+                content="",
+                sql_query="",
+                visualization=None,
+                status="processing",
+                response="Processing your request..."
+            )
+
             # Generate SQL query
-            sql_query = generate_sql_query(message)
-            logger.info(f"Generated SQL query: {sql_query}")
+            logger.info("Generating SQL query")
+            sql_query = await self.generate_sql_query(message)
+            if not sql_query:
+                return ChatResponse(
+                    message_id=str(uuid.uuid4()),
+                    content="I couldn't generate a SQL query for your question. Could you rephrase it?",
+                    sql_query="",
+                    visualization=None,
+                    status="error",
+                    response="I couldn't generate a SQL query for your question. Could you rephrase it?"
+                )
+            
+            response.sql_query = sql_query
+            logger.info(f"Generated SQL query: \n{sql_query}")
 
-            # Execute query
-            results = self.db.execute_query(sql_query)
-            num_rows = len(results) if results else 0
-            logger.info(f"Query returned {num_rows} rows")
+            # Execute query with timeout handling
+            try:
+                results = await self.execute_query(sql_query)
+                if not results:
+                    return ChatResponse(
+                        message_id=str(uuid.uuid4()),
+                        content="The query returned no results. Try adjusting your question.",
+                        sql_query=sql_query,
+                        visualization=None,
+                        status="no_results",
+                        response="The query returned no results. Try adjusting your question."
+                    )
+            except TimeoutError as te:
+                return ChatResponse(
+                    message_id=str(uuid.uuid4()),
+                    content=str(te),
+                    sql_query=sql_query,
+                    visualization=None,
+                    status="timeout",
+                    response=str(te)
+                )
+            except Exception as e:
+                return ChatResponse(
+                    message_id=str(uuid.uuid4()),
+                    content=f"Error executing query: {str(e)}",
+                    sql_query=sql_query,
+                    visualization=None,
+                    status="error",
+                    response=f"Error executing query: {str(e)}"
+                )
 
-            # Generate visualization
-            fig = create_visualization(results, message)
-            viz_data = figure_to_base64(fig) if fig else None
+            # Format results as markdown table
+            markdown_table = format_results_as_markdown_table(results)
+            
+            # Generate visualization if applicable
+            try:
+                visualization = create_visualization(results, message)
+                if visualization:
+                    response.visualization = figure_to_base64(visualization)
+            except Exception as e:
+                logger.error(f"Error creating visualization: {str(e)}")
+                # Continue without visualization
 
             # Generate analysis
-            analysis = generate_analysis_summary(results)
-            logger.info("Generated analysis summary")
+            try:
+                analysis = generate_analysis_summary(results, message)
+                response.content = f"## 📊 Query Results\n\n{markdown_table}\n\n{analysis}"
+                response.response = response.content
+                response.status = "success"
+            except Exception as e:
+                logger.error(f"Error generating analysis: {str(e)}")
+                response.content = f"## 📊 Query Results\n\n{markdown_table}\n\nI encountered an error analyzing the results."
+                response.response = response.content
+                response.status = "partial_success"
 
-            # Format response
-            response = f"""
-# 🏔️ Tourism Data Analysis
+            return response
 
-{analysis}
-
-## 🔍 Analysis Process
-✅ SQL Generation
-```sql
-{sql_query}
-```
-
-✅ Query Execution
-Retrieved {num_rows} rows
-
-{'✅' if viz_data else '❌'} Visualization
-{'' if viz_data else 'Failed to generate visualization'}
-
-✅ Analysis
-Generated analysis summary
-"""
-            return {
-                "response": response,
-                "visualization": viz_data,
-                "query": sql_query,
-                "success": True
-            }
-            
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}")
-            return {
-                "response": f"Error processing your request: {str(e)}",
-                "visualization": None,
-                "query": None,
-                "success": False
-            }
+            logger.error(traceback.format_exc())
+            return ChatResponse(
+                message_id=str(uuid.uuid4()),
+                content=f"An error occurred: {str(e)}",
+                sql_query="",
+                visualization=None,
+                status="error",
+                response=f"An error occurred: {str(e)}"
+            )
     
     async def get_schema_info(self) -> List[Dict[str, Any]]:
         """Get database schema information"""
@@ -232,10 +275,11 @@ Generated analysis summary
             logger.error(traceback.format_exc())
             raise
     
-    def close(self):
-        """Close database connection"""
-        if self.db:
-            self.db.close()
+    async def close(self):
+        """Cleanup resources"""
+        if self.openai_adapter:
+            await self.openai_adapter.close()
+        logger.info("ChatService closed successfully")
 
     def __del__(self):
         """Cleanup when the service is destroyed"""
