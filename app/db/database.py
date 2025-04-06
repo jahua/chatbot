@@ -70,8 +70,14 @@ class DatabaseService:
         """Initialize database service"""
         logger.debug("Initializing DatabaseService")
         try:
-            # Create database engine
-            self.engine = create_engine('postgresql://postgres:336699@3.76.40.121:5432/trip_dw')
+            # Create database engine with timeout settings
+            self.engine = create_engine(
+                'postgresql://postgres:336699@3.76.40.121:5432/trip_dw',
+                connect_args={
+                    'connect_timeout': 10,
+                    'options': '-c statement_timeout=15000'  # 15 seconds timeout
+                }
+            )
             logger.debug("Created database engine")
             
             # Create session factory
@@ -84,13 +90,21 @@ class DatabaseService:
             raise
 
     def execute_query(self, query: str) -> List[Dict[str, Any]]:
-        """Execute SQL query and return results as list of dictionaries"""
+        """Execute SQL query and return results"""
         try:
             with self.engine.connect() as connection:
+                # Set statement timeout for this connection
+                connection.execute(text("SET statement_timeout = 15000"))  # 15 seconds
+                
+                # Execute query with timeout
                 result = connection.execute(text(query))
                 columns = result.keys()
                 return [dict(zip(columns, row)) for row in result]
+                
         except Exception as e:
+            if "canceling statement due to statement timeout" in str(e):
+                logger.warning("Query execution timed out after 15 seconds")
+                raise TimeoutError("Query execution timed out. Please try a more specific query or add filters.")
             logger.error(f"Error executing query: {str(e)}")
             logger.error(traceback.format_exc())
             raise

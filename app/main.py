@@ -4,13 +4,19 @@ from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import ChatService
 from app.db.database import DatabaseService
 from app.llm.openai_adapter import OpenAIAdapter
+from app.db.schema_manager import schema_manager
+from dotenv import load_dotenv
 import logging
+import os
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create FastAPI app
+# Initialize FastAPI app
 app = FastAPI(title="Tourism Data Analysis Chatbot")
 
 # Configure CORS
@@ -22,29 +28,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global service instances
-chat_service = None
-openai_adapter = None
-db_service = None
+# Initialize services
+db_service = DatabaseService()
+openai_adapter = OpenAIAdapter(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    api_base=os.getenv("OPENAI_API_BASE")
+)
+chat_service = ChatService(db_service, openai_adapter, schema_manager)
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup"""
     try:
-        global chat_service, openai_adapter, db_service
-        
-        # Initialize OpenAI adapter
-        openai_adapter = OpenAIAdapter()
-        logger.info("OpenAI adapter initialized")
-        
-        # Initialize database service
-        db_service = DatabaseService()
-        logger.info("Database service initialized")
-        
-        # Initialize chat service with dependencies
-        chat_service = ChatService(openai_adapter=openai_adapter, db=db_service)
-        logger.info("Chat service initialized")
-        
+        logger.info("Services initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing services: {str(e)}")
         raise
@@ -53,9 +49,8 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup services on shutdown"""
     try:
-        global chat_service
         if chat_service:
-            chat_service.close()
+            await chat_service.close()
             logger.info("Chat service closed")
     except Exception as e:
         logger.error(f"Error during shutdown: {str(e)}")
@@ -68,7 +63,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             raise HTTPException(status_code=503, detail="Chat service not initialized")
             
         response = await chat_service.process_message(request.message)
-        return ChatResponse(**response)
+        return response
         
     except Exception as e:
         logger.error(f"Error processing chat request: {str(e)}")

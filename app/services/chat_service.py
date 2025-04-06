@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.db.database import SessionLocal, DatabaseService, get_db
 from app.llm.openai_adapter import OpenAIAdapter
 from app.schemas.chat import ChatMessage, ChatResponse
+from app.db.schema_manager import SchemaManager
 from sqlalchemy import text
 import pandas as pd
 import logging
@@ -450,13 +451,12 @@ class ChatService:
     
     def close(self):
         """Close database connection"""
-        if self.db:
-            self.db.close()
+        if hasattr(self, 'db_service'):
+            self.db_service.close()
 
     def __del__(self):
         """Cleanup when the service is destroyed"""
-        if hasattr(self, 'db'):
-            self.db.close() 
+        self.close()
 
     async def generate_sql_query(self, message: str) -> str:
         """Generate SQL query from user message"""

@@ -265,7 +265,7 @@ def process_query(query: str):
     try:
         # Make API call
         response = requests.post(
-            "http://localhost:8001/chat",
+            "http://localhost:8000/chat",
             json={"message": query},
             headers={"Content-Type": "application/json"}
         )
