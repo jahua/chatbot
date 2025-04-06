@@ -20,18 +20,24 @@ from app.utils.sql_utils import extract_sql_query, clean_sql_query
 import re
 import psycopg2
 import plotly.graph_objects as go
-from app.utils.visualization import create_visualization, figure_to_base64
-from app.utils.sql_generator import generate_sql_query
+from app.utils.visualization import generate_visualization
+from app.utils.sql_generator import SQLGenerator
+from app.utils.db_utils import execute_query
 from app.utils.analysis_generator import generate_analysis_summary
+from app.utils.intent_parser import QueryIntent
+from app.services.database_service import DatabaseService
+from app.utils.intent_parser import IntentParser
+from app.models.chat_request import ChatRequest
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class ChatService:
-    def __init__(self, openai_adapter: OpenAIAdapter, db: DatabaseService):
-        """Initialize chat service with OpenAI adapter and database connection"""
-        self.openai_adapter = openai_adapter
-        self.db = db
+    def __init__(self):
+        """Initialize the chat service with OpenAI adapter and SQL generator"""
+        self.llm = OpenAIAdapter()
+        self.sql_generator = SQLGenerator()
+        self.db_service = DatabaseService()
         logger.info("ChatService initialized successfully")
 
     def is_conversational_message(self, message: str) -> bool:
@@ -148,89 +154,299 @@ class ChatService:
             logger.error(traceback.format_exc())
             return "I can help you analyze tourism data including visitor statistics and transaction data. Please ask a specific question about tourism patterns."
     
-    async def process_message(self, message: str) -> Dict[str, Any]:
-        """Process user message and return response with analysis"""
+    async def process_chat(self, message: str, session_id: str) -> Dict[str, Any]:
+        """Process a chat message and return a response with visualization"""
         try:
-            # Generate SQL query
-            sql_query = generate_sql_query(message)
-            logger.info(f"Generated SQL query: {sql_query}")
+            # Check if it's a conversational message
+            if self.is_conversational_message(message):
+                return {
+                    'response': "I'm here to help you analyze tourism data. Please ask me about visitor statistics, spending patterns, or tourism trends!",
+                    'visualization': None,
+                    'sql_query': None,
+                    'data': None,
+                    'analysis': None,
+                    'metadata': {'type': 'conversation'}
+                }
 
-            # Execute query
-            results = self.db.execute_query(sql_query)
-            num_rows = len(results) if results else 0
-            logger.info(f"Query returned {num_rows} rows")
+            # Check if it's a schema inquiry
+            if self.is_schema_inquiry(message):
+                schema_summary = await self.get_schema_summary()
+                return {
+                    'response': schema_summary,
+                    'visualization': None,
+                    'sql_query': None,
+                    'data': None,
+                    'analysis': None,
+                    'metadata': {'type': 'schema_info'}
+                }
 
-            # Generate visualization
-            fig = create_visualization(results, message)
-            viz_data = figure_to_base64(fig) if fig else None
-
-            # Generate analysis
-            analysis = generate_analysis_summary(results)
-            logger.info("Generated analysis summary")
-
-            # Format response
-            response = f"""
-# 🏔️ Tourism Data Analysis
-
-{analysis}
-
-## 🔍 Analysis Process
-✅ SQL Generation
-```sql
-{sql_query}
-```
-
-✅ Query Execution
-Retrieved {num_rows} rows
-
-{'✅' if viz_data else '❌'} Visualization
-{'' if viz_data else 'Failed to generate visualization'}
-
-✅ Analysis
-Generated analysis summary
-"""
-            return {
-                "response": response,
-                "visualization": viz_data,
-                "query": sql_query,
-                "success": True
-            }
+            # Generate SQL query based on user message
+            try:
+                query_result = self.sql_generator.generate_sql_query(message)
+                logger.debug(f"Generated SQL query: {query_result}")
+                
+                if not query_result or 'error' in query_result:
+                    error_msg = query_result.get('error', 'Unknown error in query generation') if query_result else 'Failed to generate query'
+                    logger.error(f"SQL generation failed for message: {message}, error: {error_msg}")
+                    return {
+                        'response': "I couldn't understand your query. Could you please rephrase it?",
+                        'visualization': None,
+                        'sql_query': None,
+                        'data': None,
+                        'analysis': None,
+                        'metadata': {'type': 'error', 'reason': 'query_generation_failed', 'message': message, 'error': error_msg}
+                    }
+                
+                sql_query = query_result.get('query', '')
+                intent_str = query_result.get('intent', 'visitor_count')
+                
+                # Convert string intent to enum
+                intent = None
+                for intent_enum in QueryIntent:
+                    if intent_enum.value == intent_str:
+                        intent = intent_enum
+                        break
+                
+                metadata = query_result.get('metadata', {})
+                
+                # Validate query
+                try:
+                    is_valid = await self.db_service.validate_query(sql_query)
+                    if not is_valid:
+                        logger.error(f"Invalid SQL query: {sql_query}")
+                        return {
+                            'response': "I couldn't generate a valid query for your question. Could you please rephrase it?",
+                            'visualization': None,
+                            'sql_query': sql_query,
+                            'data': None,
+                            'analysis': None,
+                            'metadata': {'type': 'error', 'reason': 'invalid_query', 'query': sql_query}
+                        }
+                except Exception as e:
+                    logger.error(f"Error during query validation: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    is_valid = False
+                
+                # Execute query and get data
+                data = await self.db_service.execute_query(sql_query)
+                
+                if not data:
+                    # Check if this is a future date query
+                    time_range = metadata.get('time_range', {})
+                    start_date = time_range.get('start_date', '')
+                    
+                    if start_date and datetime.strptime(start_date, '%Y-%m-%d') > datetime.now():
+                        return {
+                            'response': f"I don't have data for future dates like {start_date}. Would you like to see data from a past period instead?",
+                            'visualization': None,
+                            'sql_query': sql_query,
+                            'data': None,
+                            'analysis': None,
+                            'metadata': {'type': 'future_date', 'start_date': start_date}
+                        }
+                    
+                    return {
+                        'response': "I couldn't find any data matching your query.",
+                        'visualization': None,
+                        'sql_query': sql_query,
+                        'data': None,
+                        'analysis': None,
+                        'metadata': {'type': 'no_data', **metadata}
+                    }
+                
+                # Generate visualization based on intent and data
+                try:
+                    visualization_data = generate_visualization(data, intent)
+                    visualization_json = visualization_data
+                except Exception as viz_error:
+                    logger.error(f"Error generating visualization: {str(viz_error)}")
+                    logger.error(traceback.format_exc())
+                    visualization_json = None
+                
+                # Generate analysis summary
+                analysis = self._generate_analysis(data, intent, metadata)
+                
+                return {
+                    'response': "Here's what I found based on your query.",
+                    'visualization': visualization_json,
+                    'sql_query': sql_query,
+                    'data': data,
+                    'analysis': analysis,
+                    'metadata': {'type': 'success', **metadata}
+                }
+                
+            except Exception as e:
+                logger.error(f"Error processing SQL generation: {str(e)}")
+                logger.error(traceback.format_exc())
+                return {
+                    'response': "Sorry, I encountered an error while processing your request.",
+                    'visualization': None,
+                    'sql_query': None,
+                    'data': None,
+                    'analysis': None,
+                    'metadata': {'type': 'error', 'reason': 'processing_error', 'error': str(e)}
+                }
             
         except Exception as e:
-            logger.error(f"Error processing message: {str(e)}")
+            logger.error(f"Error processing chat message: {str(e)}")
+            logger.error(traceback.format_exc())
             return {
-                "response": f"Error processing your request: {str(e)}",
-                "visualization": None,
-                "query": None,
-                "success": False
+                'response': "Sorry, I encountered an error while processing your request.",
+                'visualization': None,
+                'sql_query': None,
+                'data': None,
+                'analysis': None,
+                'metadata': {'type': 'error', 'reason': 'processing_error', 'error': str(e)}
             }
     
     async def get_schema_info(self) -> List[Dict[str, Any]]:
-        """Get database schema information"""
+        """
+        Get database schema information
+        """
         try:
-            logger.debug("Getting schema information")
-            schema_query = """
-                SELECT table_name, column_name, data_type 
-                FROM information_schema.columns 
-                WHERE table_schema = 'data_lake'
-                ORDER BY table_name, ordinal_position;
-            """
-            results = await self.db.execute_query(schema_query)
-            schema_dict = {}
-            for row in results:
-                table = row['table_name']
-                if table not in schema_dict:
-                    schema_dict[table] = []
-                schema_dict[table].append(f"{row['column_name']} ({row['data_type']})")
-            
-            schema_string = "\n".join([f"Table {table}: {', '.join(columns)}" for table, columns in schema_dict.items()])
-            logger.debug(f"Retrieved schema information: \n{schema_string}")
-            # Return raw results for the endpoint
-            return results
+            return await self.db_service.get_schema_info()
         except Exception as e:
-            logger.error(f"Error getting schema information: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
+            logger.error(f"Error getting schema info: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    def _generate_analysis(self, data: List[Dict[str, Any]], intent: Optional[QueryIntent], metadata: Dict[str, Any]) -> str:
+        """
+        Generate a natural language analysis of the data based on intent
+        """
+        try:
+            if not data:
+                return "No data available for analysis."
+            
+            if intent == QueryIntent.VISITOR_COMPARISON:
+                return self._analyze_visitor_comparison(data)
+            elif intent == QueryIntent.PEAK_PERIOD:
+                return self._analyze_peak_period(data)
+            elif intent == QueryIntent.SPENDING_ANALYSIS:
+                return self._analyze_spending(data)
+            elif intent == QueryIntent.TREND_ANALYSIS:
+                return self._analyze_trend(data)
+            else:
+                return self._analyze_default(data)
+                
+        except Exception as e:
+            logger.error(f"Error generating analysis: {str(e)}")
+            return "Error generating analysis."
+    
+    def _analyze_visitor_comparison(self, data: List[Dict[str, Any]]) -> str:
+        """Generate analysis for visitor comparison data"""
+        try:
+            total_swiss = sum(d.get('swiss_tourists', 0) for d in data)
+            total_foreign = sum(d.get('foreign_tourists', 0) for d in data)
+            total = total_swiss + total_foreign
+            
+            swiss_percent = (total_swiss / total * 100) if total > 0 else 0
+            foreign_percent = (total_foreign / total * 100) if total > 0 else 0
+            
+            return (
+                f"During this period, there were {total:,} total visitors. "
+                f"Swiss tourists made up {swiss_percent:.1f}% ({total_swiss:,}) "
+                f"while foreign tourists accounted for {foreign_percent:.1f}% ({total_foreign:,})."
+            )
+        except Exception as e:
+            logger.error(f"Error analyzing visitor comparison: {str(e)}")
+            return "Error analyzing visitor comparison data."
+    
+    def _analyze_peak_period(self, data: List[Dict[str, Any]]) -> str:
+        """Generate analysis for peak period data"""
+        try:
+            if not data:
+                return "No data available for peak period analysis."
+            
+            # Find peak day
+            peak_day = max(data, key=lambda x: x.get('total_visitors', 0))
+            peak_date = peak_day.get('date', 'unknown date')
+            peak_visitors = peak_day.get('total_visitors', 0)
+            
+            # Calculate average
+            avg_visitors = sum(d.get('total_visitors', 0) for d in data) / len(data)
+            
+            return (
+                f"The peak tourism day was {peak_date} with {peak_visitors:,} visitors. "
+                f"This is {(peak_visitors/avg_visitors - 1) * 100:.1f}% above the average "
+                f"of {avg_visitors:.0f} visitors per day."
+            )
+        except Exception as e:
+            logger.error(f"Error analyzing peak period: {str(e)}")
+            return "Error analyzing peak period data."
+    
+    def _analyze_spending(self, data: List[Dict[str, Any]]) -> str:
+        """Generate analysis for spending data"""
+        try:
+            if not data:
+                return "No data available for spending analysis."
+            
+            total_spending = sum(d.get('total_spending', 0) for d in data)
+            avg_transaction = sum(d.get('average_transaction', 0) for d in data) / len(data)
+            
+            # Find top spending industry
+            top_industry = max(data, key=lambda x: x.get('total_spending', 0))
+            
+            return (
+                f"Total spending across all industries was ${total_spending:,.2f}. "
+                f"The average transaction value was ${avg_transaction:.2f}. "
+                f"The highest spending was in {top_industry.get('industry', 'unknown industry')} "
+                f"with ${top_industry.get('total_spending', 0):,.2f}."
+            )
+        except Exception as e:
+            logger.error(f"Error analyzing spending: {str(e)}")
+            return "Error analyzing spending data."
+    
+    def _analyze_trend(self, data: List[Dict[str, Any]]) -> str:
+        """Generate analysis for trend data"""
+        try:
+            if not data:
+                return "No data available for trend analysis."
+            
+            # Calculate growth rates
+            first_day = data[0]
+            last_day = data[-1]
+            
+            total_growth = ((last_day.get('total_visitors', 0) / first_day.get('total_visitors', 1) - 1) * 100)
+            swiss_growth = ((last_day.get('swiss_tourists', 0) / first_day.get('swiss_tourists', 1) - 1) * 100)
+            foreign_growth = ((last_day.get('foreign_tourists', 0) / first_day.get('foreign_tourists', 1) - 1) * 100)
+            
+            return (
+                f"Over this period, total visitors {total_growth:+.1f}%. "
+                f"Swiss tourists {swiss_growth:+.1f}% while foreign tourists {foreign_growth:+.1f}%. "
+                f"This suggests {'increasing' if total_growth > 0 else 'decreasing'} tourism activity."
+            )
+        except Exception as e:
+            logger.error(f"Error analyzing trend: {str(e)}")
+            return "Error analyzing trend data."
+    
+    def _analyze_default(self, data: List[Dict[str, Any]]) -> str:
+        """Generate default analysis when intent is not specified"""
+        try:
+            if not data:
+                return "No data available for analysis."
+            
+            # Try to find numeric columns
+            numeric_cols = [k for k, v in data[0].items() if isinstance(v, (int, float))]
+            
+            if numeric_cols:
+                col = numeric_cols[0]
+                values = [d.get(col, 0) for d in data]
+                total = sum(values)
+                avg = total / len(values)
+                max_val = max(values)
+                min_val = min(values)
+                
+                return (
+                    f"The {col.replace('_', ' ')} data shows a total of {total:,.2f} "
+                    f"with an average of {avg:,.2f}. Values range from {min_val:,.2f} "
+                    f"to {max_val:,.2f}."
+                )
+            else:
+                return "No numeric data available for analysis."
+                
+        except Exception as e:
+            logger.error(f"Error generating default analysis: {str(e)}")
+            return "Error analyzing data."
     
     def close(self):
         """Close database connection"""
@@ -245,7 +461,7 @@ Generated analysis summary
     async def generate_sql_query(self, message: str) -> str:
         """Generate SQL query from user message"""
         try:
-            sql_query = generate_sql_query(message)
+            sql_query = self.sql_generator.generate_sql_query(message)
             logger.info(f"Generated SQL query: {sql_query}")
             return sql_query
         except Exception as e:
