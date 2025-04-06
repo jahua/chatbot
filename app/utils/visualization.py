@@ -4,8 +4,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
+import json
+from app.utils.intent_parser import QueryIntent
 
 logger = logging.getLogger(__name__)
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        import datetime
+        if isinstance(obj, (datetime.date, datetime.datetime)):
+            return obj.isoformat()
+        return super().default(obj)
 
 def figure_to_base64(fig) -> Optional[str]:
     """Convert a matplotlib figure to base64 encoded string"""
@@ -27,6 +36,33 @@ def figure_to_base64(fig) -> Optional[str]:
         
     except Exception as e:
         logger.error(f"Error converting figure to base64: {str(e)}")
+        return None
+
+def generate_visualization(data: List[Dict[Any, Any]], intent=None) -> Optional[Any]:
+    """Generate visualization based on data and intent (wrapper for compatibility)"""
+    try:
+        # Map intent to query type for visualization
+        query = ""
+        if intent == QueryIntent.VISITOR_COUNT:
+            query = "visitor count"
+        elif intent == QueryIntent.PEAK_PERIOD:
+            query = "peak tourism periods"
+        elif intent == QueryIntent.SPENDING_ANALYSIS:
+            query = "spending analysis"
+        elif intent == QueryIntent.VISITOR_COMPARISON:
+            query = "visitor comparison"
+        elif intent == QueryIntent.TREND_ANALYSIS:
+            query = "visitor trends"
+            
+        # Create the visualization using existing function
+        fig = create_visualization(data, query)
+        
+        # Convert figure to base64 for API response
+        if fig:
+            return figure_to_base64(fig)
+        return None
+    except Exception as e:
+        logger.error(f"Error generating visualization: {str(e)}")
         return None
 
 def create_visualization(data: List[Dict[Any, Any]], query: str) -> Optional[plt.Figure]:

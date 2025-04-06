@@ -456,34 +456,4 @@ class ChatService:
 
     def __del__(self):
         """Cleanup when the service is destroyed"""
-        self.close()
-
-    async def generate_sql_query(self, message: str) -> str:
-        """Generate SQL query from user message"""
-        try:
-            sql_query = self.sql_generator.generate_sql_query(message)
-            logger.info(f"Generated SQL query: {sql_query}")
-            return sql_query
-        except Exception as e:
-            logger.error(f"Error generating SQL query: {str(e)}")
-            raise
-    
-    async def execute_query(self, sql_query: str) -> List[Dict[str, Any]]:
-        """Execute SQL query and return results"""
-        try:
-            results = self.db.execute_query(sql_query)
-            logger.info(f"Query returned {len(results)} rows")
-            return results
-        except Exception as e:
-            logger.error(f"Error executing query: {str(e)}")
-            raise
-    
-    async def generate_analysis(self, data: List[Dict[str, Any]], query: str) -> str:
-        """Generate analysis from query results"""
-        try:
-            analysis = generate_analysis(data, query)
-            logger.info("Generated analysis summary")
-            return analysis
-        except Exception as e:
-            logger.error(f"Error generating analysis: {str(e)}")
-            raise 
+        self.close() 
