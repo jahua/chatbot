@@ -8,21 +8,33 @@ import logging
 import traceback
 import asyncio
 import os
+import time
+from datetime import datetime
 
 # Set up detailed logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# Database URL configuration
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "336699")  # Default for development
+DB_HOST = os.getenv("DB_HOST", "3.76.40.121")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "trip_dw")
+
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
 # Create SQLAlchemy engine with connection pooling
-logger.debug(f"Creating database engine with URL: {settings.DATABASE_URL}")
+logger.debug(f"Creating database engine with URL: {DATABASE_URL}")
 engine = create_engine(
-    settings.DATABASE_URL,
+    DATABASE_URL,
     pool_size=5,
     max_overflow=10,
     pool_timeout=30,
-    pool_recycle=1800,
+    pool_recycle=3600,
     pool_pre_ping=True,
-    echo=True  # Enable SQL query logging
+    echo=True,  # Enable SQL query logging
+    connect_args={"options": "-c statement_timeout=15000"}  # 15 seconds timeout
 )
 
 # Add event listeners for connection lifecycle
@@ -49,90 +61,70 @@ SessionLocal = sessionmaker(
 # Create Base class
 Base = declarative_base()
 
+# Make sure the database is available
+try:
+    logger.debug("Initializing DatabaseService")
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+    logger.debug("Created database engine")
+except Exception as e:
+    logger.error(f"Database connection error: {str(e)}")
+    raise
+
+logger.debug("Created session factory")
+
 def get_db():
-    """Get database session"""
-    logger.debug("Creating new database session")
+    """Dependency for getting a database session"""
     db = SessionLocal()
     try:
-        logger.debug("Database session created successfully")
         yield db
-    except Exception as e:
-        logger.error(f"Error in database session: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
     finally:
-        logger.debug("Closing database session")
         db.close()
-        logger.debug("Database session closed")
 
 class DatabaseService:
+    """Service for database operations"""
+    
     def __init__(self):
         """Initialize database service"""
-        logger.debug("Initializing DatabaseService")
+        self.engine = engine
+        
+    def close(self):
+        """Close database connections"""
+        # No need to explicitly close with SQLAlchemy connection pooling
+        pass
+        
+    def execute_query(self, query: str, params=None):
+        """Execute a SQL query and return the results"""
+        start_time = time.time()
         try:
-            # Create database engine with timeout settings
-            self.engine = create_engine(
-                'postgresql://postgres:336699@3.76.40.121:5432/trip_dw',
-                connect_args={
-                    'connect_timeout': 10,
-                    'options': '-c statement_timeout=15000'  # 15 seconds timeout
-                }
-            )
-            logger.debug("Created database engine")
-            
-            # Create session factory
-            self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
-            logger.debug("Created session factory")
-            
-        except Exception as e:
-            logger.error(f"Error initializing database service: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
-
-    def execute_query(self, query: str) -> List[Dict[str, Any]]:
-        """Execute SQL query and return results"""
-        try:
-            with self.engine.connect() as connection:
-                # Set statement timeout for this connection
-                connection.execute(text("SET statement_timeout = 15000"))  # 15 seconds
+            with SessionLocal() as session:
+                result = session.execute(text(query), params or {})
+                rows = result.fetchall()
                 
-                # Execute query with timeout
-                result = connection.execute(text(query))
-                columns = result.keys()
-                return [dict(zip(columns, row)) for row in result]
-                
+                if rows:
+                    # Convert SQLAlchemy Row objects to dictionaries
+                    column_names = result.keys()
+                    return [dict(zip(column_names, row)) for row in rows]
+                return []
         except Exception as e:
-            if "canceling statement due to statement timeout" in str(e):
-                logger.warning("Query execution timed out after 15 seconds")
+            execution_time = time.time() - start_time
+            # Check if it's likely a timeout
+            if execution_time >= 14.5:  # Just under our 15s timeout
+                logger.warning(f"Query execution timed out after {execution_time:.1f} seconds")
                 raise TimeoutError("Query execution timed out. Please try a more specific query or add filters.")
             logger.error(f"Error executing query: {str(e)}")
-            logger.error(traceback.format_exc())
             raise
-
-    def close(self):
-        """Close database connection"""
-        logger.debug("Closing DatabaseService")
+            
+    def validate_query(self, query: str):
+        """Validate a SQL query without executing it"""
         try:
-            if hasattr(self, 'session'):
-                logger.debug("Closing session in DatabaseService")
-                self.session.close()
-            if hasattr(self, 'engine'):
-                logger.debug("Disposing engine in DatabaseService")
-                self.engine.dispose()
-            logger.debug("DatabaseService closed successfully")
+            with SessionLocal() as session:
+                # Add EXPLAIN to analyze the query without executing
+                explain_query = f"EXPLAIN {query}"
+                session.execute(text(explain_query))
+                return True
         except Exception as e:
-            logger.error(f"Error closing DatabaseService: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
-
-# Create a single instance of DatabaseService
-_db_service = None
-
-def get_db() -> DatabaseService:
-    """Get database service instance"""
-    global _db_service
-    if _db_service is None:
-        _db_service = DatabaseService()
-    return _db_service
+            logger.error(f"Error validating query: {str(e)}")
+            return False
 
 __all__ = ['engine', 'SessionLocal', 'get_db', 'DatabaseService'] 

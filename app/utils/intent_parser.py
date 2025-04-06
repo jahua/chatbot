@@ -55,48 +55,50 @@ class IntentParser:
             "peak": r"(peak|busiest|most)"
         }
     
-    def parse_query_intent(self, query: str) -> Dict[str, Any]:
+    def parse_query_intent(self, user_message: str) -> Dict[str, Any]:
         """
-        Parse the query to determine intent and extract parameters
-        Returns a dictionary containing intent and relevant parameters
+        Parse the user's message to determine the query intent, time range, and granularity
+        Return a dictionary with the parsed intent information
         """
         try:
-            query = query.lower()
+            # Convert message to lowercase for easier matching
+            message = user_message.lower()
             
-            # Initialize result
+            # Initialize the result dictionary
             result = {
-                "intent": None,
-                "time_range": self._extract_time_range(query),
-                "granularity": self._determine_granularity(query),
-                "comparison_type": None,
-                "sql_components": {}
+                "intent": QueryIntent.VISITOR_COUNT,  # Default intent
+                "time_range": {},
+                "granularity": self._detect_time_granularity(message),
+                "comparison_type": None
             }
             
-            # Determine primary intent
-            if any(pattern in query for pattern in ["compare", "vs", "versus", "ratio"]):
-                result["intent"] = QueryIntent.VISITOR_COMPARISON
-                result["comparison_type"] = self._determine_comparison_type(query)
-                
-            elif any(pattern in query for pattern in ["spend", "transaction", "purchase"]):
+            # Detect spending analysis intent
+            spending_keywords = ["spending", "spend", "transaction", "purchase", "revenue"]
+            spending_match = any(keyword in message for keyword in spending_keywords)
+            
+            if spending_match:
                 result["intent"] = QueryIntent.SPENDING_ANALYSIS
                 
-            elif any(pattern in query for pattern in ["peak", "busiest", "most"]):
-                result["intent"] = QueryIntent.PEAK_PERIOD
-                
-            elif any(pattern in query for pattern in ["trend", "pattern", "over time"]):
-                result["intent"] = QueryIntent.TREND_ANALYSIS
-                
-            else:
-                result["intent"] = QueryIntent.VISITOR_COUNT
+                # Check for industry focus for spending analysis
+                if "industry" in message and ("highest" in message or "top" in message):
+                    # Store the original message for context
+                    result["original_message"] = user_message
             
-            # Generate SQL components based on intent
-            result["sql_components"] = self._generate_sql_components(result)
+            # If message contains "peak" keywords, set intent to peak period analysis
+            peak_keywords = ["peak", "busiest", "most visited", "most popular", "highest attendance", "most tourists"]
+            if any(keyword in message for keyword in peak_keywords):
+                result["intent"] = QueryIntent.PEAK_PERIOD
+            
+            # Extract time range information (existing code)
+            result["time_range"] = self._extract_time_range(message)
+            
+            # Generate SQL components for the intent
+            result["sql_components"] = self._generate_sql_components(message, result["intent"], result["time_range"], result["granularity"])
             
             return result
-            
         except Exception as e:
             logger.error(f"Error parsing query intent: {str(e)}")
-            return {"intent": None, "error": str(e)}
+            return {"error": f"Failed to parse your question: {str(e)}. Please try phrasing it differently."}
     
     def _extract_time_range(self, query: str) -> Dict[str, str]:
         """Extract time range information from the query"""
@@ -138,28 +140,18 @@ class IntentParser:
         
         return time_range
     
-    def _determine_granularity(self, query: str) -> TimeGranularity:
-        """Determine the time granularity for the query"""
-        query = query.lower()
-        
-        # Check for specific time units
-        if any(term in query for term in ["daily", "day", "days"]):
-            return TimeGranularity.DAY
-        elif any(term in query for term in ["weekly", "week", "weeks"]):
+    def _detect_time_granularity(self, message: str) -> TimeGranularity:
+        """Detect the time granularity from the message"""
+        if any(term in message for term in ["weekly", "week", "weeks"]):
             return TimeGranularity.WEEK
-        elif any(term in query for term in ["monthly", "month", "months"]):
+        elif any(term in message for term in ["monthly", "month", "months"]):
             return TimeGranularity.MONTH
-        elif any(term in query for term in ["season", "seasonal", "spring", "summer", "autumn", "winter", "fall"]):
-            return TimeGranularity.SEASON
-        elif any(term in query for term in ["yearly", "year", "years"]):
+        elif any(term in message for term in ["yearly", "year", "annual"]):
             return TimeGranularity.YEAR
-        
-        # Default to month for period analysis
-        if any(term in query for term in ["period", "peak", "trend", "pattern"]):
-            return TimeGranularity.MONTH
-        
-        # Default to day for specific date queries
-        return TimeGranularity.DAY
+        elif any(term in message for term in ["season", "seasonal", "spring", "summer", "fall", "winter"]):
+            return TimeGranularity.SEASON
+        else:
+            return TimeGranularity.DAY  # Default to daily granularity
     
     def _determine_comparison_type(self, query: str) -> str:
         """Determine the type of comparison requested"""
@@ -170,88 +162,11 @@ class IntentParser:
         else:
             return "time"
     
-    def _generate_sql_components(self, parsed_intent: Dict[str, Any]) -> Dict[str, str]:
-        """Generate SQL components based on parsed intent"""
+    def _generate_sql_components(self, message: str, intent: QueryIntent, time_range: Dict[str, str], granularity: TimeGranularity) -> Dict[str, str]:
+        """Generate SQL components based on intent and parameters"""
         components = {}
         
-        # Determine date grouping based on granularity and intent
-        if parsed_intent["intent"] == QueryIntent.PEAK_PERIOD:
-            # For peak periods, use monthly grouping unless specifically asked for daily
-            if parsed_intent.get("granularity") == TimeGranularity.DAY:
-                date_grouping = "aoi_date"
-            else:
-                date_grouping = "DATE_TRUNC('month', aoi_date)"
-        else:
-            # For other queries, use standard granularity mapping
-            granularity = parsed_intent.get("granularity", TimeGranularity.DAY)
-            if granularity == TimeGranularity.DAY:
-                date_grouping = "aoi_date"
-            elif granularity == TimeGranularity.WEEK:
-                date_grouping = "DATE_TRUNC('week', aoi_date)"
-            elif granularity == TimeGranularity.MONTH:
-                date_grouping = "DATE_TRUNC('month', aoi_date)"
-            elif granularity == TimeGranularity.SEASON:
-                date_grouping = "DATE_TRUNC('month', aoi_date)"
-            elif granularity == TimeGranularity.YEAR:
-                date_grouping = "DATE_TRUNC('year', aoi_date)"
-            else:
-                date_grouping = "aoi_date"
-        
-        # Build WHERE clause
-        where_parts = []
-        if parsed_intent["time_range"]["start_date"]:
-            where_parts.append(f"aoi_date >= '{parsed_intent['time_range']['start_date']}'")
-        if parsed_intent["time_range"]["end_date"]:
-            where_parts.append(f"aoi_date < '{parsed_intent['time_range']['end_date']}'")
-        where_clause = "WHERE " + " AND ".join(where_parts) if where_parts else ""
-        
-        # Generate components based on intent
-        if parsed_intent["intent"] == QueryIntent.VISITOR_COMPARISON:
-            components["select_clause"] = f"""
-                SELECT 
-                    {date_grouping} as date,
-                    SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
-                    SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
-                    SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) as total_visitors,
-                    CAST(100.0 * SUM((visitors->>'swissTourist')::numeric) / NULLIF(SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric), 0) AS DECIMAL(5,2)) as swiss_percentage,
-                    CAST(100.0 * SUM((visitors->>'foreignTourist')::numeric) / NULLIF(SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric), 0) AS DECIMAL(5,2)) as foreign_percentage
-            """
-            components["from_clause"] = "FROM data_lake.aoi_days_raw"
-            components["where_clause"] = where_clause
-            components["group_by_clause"] = "GROUP BY date"
-            components["order_by_clause"] = "ORDER BY date"
-            
-        elif parsed_intent["intent"] == QueryIntent.PEAK_PERIOD:
-            # For peak periods, we want to identify the top periods and their relative rankings
-            components["select_clause"] = f"""
-                WITH period_stats AS (
-                    SELECT 
-                        {date_grouping}::date as date,
-                        SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
-                        SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
-                        SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) as total_visitors,
-                        RANK() OVER (ORDER BY SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) DESC) as period_rank
-                    FROM data_lake.aoi_days_raw
-                    {where_clause}
-                    GROUP BY date
-                )
-                SELECT 
-                    date,
-                    swiss_tourists,
-                    foreign_tourists,
-                    total_visitors,
-                    period_rank,
-                    CAST(100.0 * total_visitors / SUM(total_visitors) OVER () AS DECIMAL(5,2)) as percentage_of_total
-                FROM period_stats
-                WHERE period_rank <= 10
-                ORDER BY period_rank
-            """
-            components["from_clause"] = ""  # Already included in CTE
-            components["where_clause"] = ""  # Already included in CTE
-            components["group_by_clause"] = ""  # Not needed due to CTE
-            components["order_by_clause"] = ""  # Already included in final SELECT
-            
-        elif parsed_intent["intent"] == QueryIntent.SPENDING_ANALYSIS:
+        if intent == QueryIntent.SPENDING_ANALYSIS:
             components["select_clause"] = """
                 SELECT 
                     industry,
@@ -261,26 +176,55 @@ class IntentParser:
                     CAST(100.0 * SUM(txn_amt) / SUM(SUM(txn_amt)) OVER () AS DECIMAL(5,2)) as percentage_of_total_spending
             """
             components["from_clause"] = "FROM data_lake.master_card"
-            components["where_clause"] = where_clause.replace("aoi_date", "txn_date")
+            if time_range.get("start_date") and time_range.get("end_date"):
+                components["where_clause"] = f"WHERE txn_date >= '{time_range['start_date']}' AND txn_date < '{time_range['end_date']}'"
             components["group_by_clause"] = "GROUP BY industry"
             components["order_by_clause"] = "ORDER BY total_spending DESC"
             
-        else:  # Default to visitor count with trend analysis
+        elif intent == QueryIntent.VISITOR_COUNT:
+            date_expression = self._get_date_expression_for_granularity(granularity)
             components["select_clause"] = f"""
                 SELECT 
-                    {date_grouping} as date,
+                    {date_expression} as date,
                     SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
                     SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
-                    SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) as total_visitors,
-                    LAG(SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric)) OVER (ORDER BY {date_grouping}) as previous_period_visitors,
-                    CAST(100.0 * (
-                        (SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric)) - 
-                        LAG(SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric)) OVER (ORDER BY {date_grouping})
-                    ) / NULLIF(LAG(SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric)) OVER (ORDER BY {date_grouping}), 0) AS DECIMAL(5,2)) as growth_rate
+                    SUM((visitors->>'swissTourist')::numeric + (visitors->>'foreignTourist')::numeric) as total_visitors
             """
             components["from_clause"] = "FROM data_lake.aoi_days_raw"
-            components["where_clause"] = where_clause
+            if time_range.get("start_date") and time_range.get("end_date"):
+                components["where_clause"] = f"WHERE aoi_date >= '{time_range['start_date']}' AND aoi_date < '{time_range['end_date']}'"
             components["group_by_clause"] = "GROUP BY date"
             components["order_by_clause"] = "ORDER BY date"
+            
+        elif intent == QueryIntent.PEAK_PERIOD:
+            date_expression = self._get_date_expression_for_granularity(granularity)
+            components["select_clause"] = f"""
+                SELECT 
+                    {date_expression} as date,
+                    SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
+                    SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
+                    SUM((visitors->>'swissTourist')::numeric + (visitors->>'foreignTourist')::numeric) as total_visitors
+            """
+            components["from_clause"] = "FROM data_lake.aoi_days_raw"
+            if time_range.get("start_date") and time_range.get("end_date"):
+                components["where_clause"] = f"WHERE aoi_date >= '{time_range['start_date']}' AND aoi_date < '{time_range['end_date']}'"
+            components["group_by_clause"] = "GROUP BY date"
+            components["order_by_clause"] = "ORDER BY total_visitors DESC"
+            components["limit_clause"] = "LIMIT 10"
+            
+        return components
         
-        return components 
+    def _get_date_expression_for_granularity(self, granularity: TimeGranularity) -> str:
+        """Get the appropriate SQL expression for the date based on granularity"""
+        if granularity == TimeGranularity.DAY:
+            return "aoi_date"
+        elif granularity == TimeGranularity.WEEK:
+            return "DATE_TRUNC('week', aoi_date)"
+        elif granularity == TimeGranularity.MONTH:
+            return "DATE_TRUNC('month', aoi_date)"
+        elif granularity == TimeGranularity.SEASON:
+            return "DATE_TRUNC('quarter', aoi_date)"
+        elif granularity == TimeGranularity.YEAR:
+            return "DATE_TRUNC('year', aoi_date)"
+        else:
+            return "aoi_date" 

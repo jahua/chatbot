@@ -1,0 +1,91 @@
+.visualization-wrapper {
+    width: 100%;
+    max-width: 1200px;
+    margin: 20px auto;
+    padding: 20px;
+    background-color: #ffffff;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.visualization-container {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.stat-item {
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+    background-color: #f8f9fa;
+    border-radius: 6px;
+}
+
+.stat-item label {
+    font-size: 14px;
+    color: #6c757d;
+    margin-bottom: 4px;
+}
+
+.stat-item span {
+    font-size: 16px;
+    font-weight: 500;
+    color: #212529;
+}
+
+.peak-info {
+    padding: 16px;
+    background-color: #f8f9fa;
+    border-radius: 6px;
+}
+
+.peak-item {
+    margin: 8px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.peak-item strong {
+    color: #495057;
+}
+
+.busiest-month {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #dee2e6;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.trend-stats {
+    padding: 16px;
+    background-color: #f8f9fa;
+    border-radius: 6px;
+}
+
+h3 {
+    margin: 0 0 16px 0;
+    color: #343a40;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+pre {
+    background-color: #f8f9fa;
+    padding: 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #212529;
+} 

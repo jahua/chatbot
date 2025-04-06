@@ -8,6 +8,7 @@ from app.db.schema_manager import schema_manager
 from dotenv import load_dotenv
 import logging
 import os
+import uuid
 
 # Load environment variables from .env file
 load_dotenv()
@@ -50,7 +51,7 @@ async def shutdown_event():
     """Cleanup services on shutdown"""
     try:
         if chat_service:
-            await chat_service.close()
+            chat_service.close()
             logger.info("Chat service closed")
     except Exception as e:
         logger.error(f"Error during shutdown: {str(e)}")
@@ -62,7 +63,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         if not chat_service:
             raise HTTPException(status_code=503, detail="Chat service not initialized")
             
-        response = await chat_service.process_message(request.message)
+        response = await chat_service.process_chat(request.message, session_id=str(uuid.uuid4()))
         return response
         
     except Exception as e:
