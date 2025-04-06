@@ -8,6 +8,8 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: Optional[str] = None
+    is_direct_query: bool = False
 
 class ChatResponse(BaseModel):
     message_id: str

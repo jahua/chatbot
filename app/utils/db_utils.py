@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, Any, List, Optional
 import pandas as pd
-from app.db.database import get_db
+from ..db.database import get_db
 from sqlalchemy.orm import Session
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -34,6 +34,7 @@ async def execute_query(query: str, params: Optional[Dict[str, Any]] = None) -> 
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(query, params or {})
                 results = cur.fetchall()
+                conn.commit()  # Explicitly commit the transaction
                 return [dict(row) for row in results]
     except Exception as e:
         logger.error(f"Error executing query: {str(e)}")
@@ -47,6 +48,7 @@ async def validate_query(query: str) -> bool:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(f"EXPLAIN {query}")
+                conn.commit()  # Explicitly commit to avoid transaction rollback
                 return True
     except Exception as e:
         logger.error(f"Invalid query: {str(e)}")

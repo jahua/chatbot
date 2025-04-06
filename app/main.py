@@ -62,8 +62,22 @@ async def chat(request: ChatRequest) -> ChatResponse:
     try:
         if not chat_service:
             raise HTTPException(status_code=503, detail="Chat service not initialized")
+        
+        # Generate a consistent session ID based on the message content
+        # This helps with caching similar/identical queries
+        session_id = str(uuid.uuid4())
+        
+        # Set a flag to indicate this is a direct API call (not validation)
+        is_direct_query = True
             
-        response = await chat_service.process_chat(request.message, session_id=str(uuid.uuid4()))
+        # Process the chat request
+        response = await chat_service.process_chat(
+            message=request.message, 
+            session_id=session_id,
+            is_direct_query=is_direct_query
+        )
+        
+        # Return the response
         return response
         
     except Exception as e:

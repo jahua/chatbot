@@ -1,0 +1,121 @@
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8501
+  Network URL: http://192.168.0.253:8501
+
+  For better performance, install the Watchdog module:
+
+  $ xcode-select --install
+  $ pip install watchdog
+            
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 20447
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 20447
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 9988
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 9988
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 10861
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 10861
+  Stopping...
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8501
+  Network URL: http://192.168.0.253:8501
+
+  For better performance, install the Watchdog module:
+
+  $ xcode-select --install
+  $ pip install watchdog
+            
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 10861
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 9988
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 10932
+  Stopping...
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8501
+  Network URL: http://192.168.0.253:8501
+
+  For better performance, install the Watchdog module:
+
+  $ xcode-select --install
+  $ pip install watchdog
+            
+DEBUG:__main__:Sending query to API: What was the busiest week in spring 2023?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 10932
+DEBUG:__main__:Received response for request 383b67e1-8f0f-4769-af38-341dc2c1fe8b
+DEBUG:__main__:Sending query to API: What day had the most visitors in 2023?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 20447
+DEBUG:__main__:Received response for request d2caf39f-40c0-439d-8a0c-a380a56bf9ec
+DEBUG:__main__:Sending query to API: Compare Swiss vs foreign tourists in April 2023
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 13393
+DEBUG:__main__:Received response for request 89a13407-13d5-4e04-b705-6c7010e76cfb
+DEBUG:__main__:Sending query to API: Which industry had the highest spending?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 9988
+DEBUG:__main__:Received response for request 6578c268-574c-45c9-89fb-fef6e3efaa68
+DEBUG:__main__:Sending query to API: Show visitor counts for top 3 days in summer 2023
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 10861
+DEBUG:__main__:Received response for request 51456318-5b3e-4edc-b6d8-6122d0e787e3
+DEBUG:__main__:Sending query to API: What are the demographic characteristics of visitors during peak seasons?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 10955
+DEBUG:__main__:Received response for request f67bf3c4-8338-4ad0-b99c-c2b1c546af51
+DEBUG:__main__:Sending query to API: Are there any correlations between visitor numbers and spending?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 11478
+DEBUG:__main__:Received response for request be145229-4fb9-4c92-a932-39213765f2cc
+DEBUG:__main__:Sending query to API:  What are the spending patterns across different industries?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 11478
+DEBUG:__main__:Received response for request 11ebf6b9-6ce0-467d-9501-9fcb3e5c95a9
+DEBUG:__main__:Sending query to API:  How do visitor patterns differ between domestic and international tourists?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 20447
+DEBUG:__main__:Received response for request c3f0f87d-31bd-4733-b174-b497f37f95df
+  Stopping...
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8501
+  Network URL: http://192.168.0.253:8501
+
+  For better performance, install the Watchdog module:
+
+  $ xcode-select --install
+  $ pip install watchdog
+            
+DEBUG:__main__:Sending query to API: What was the busiest week in spring 2023?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 10932
+DEBUG:__main__:Received response for request 4e24c76a-d011-4a7e-bbd1-e21268f86a36
+DEBUG:__main__:Sending query to API: What day had the most visitors in 2023?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 20447
+DEBUG:__main__:Received response for request be383968-f701-4ed8-8a10-f76c08bfb322
+DEBUG:__main__:Sending query to API: Compare Swiss vs foreign tourists in April 2023
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 13393
+DEBUG:__main__:Received response for request 1205d450-5f9e-4613-8265-19fa1e303d48
+DEBUG:__main__:Sending query to API: Which industry had the highest spending?
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 9988
+DEBUG:__main__:Received response for request da699de7-69ad-42e8-8c30-1fcfbf65c256
+DEBUG:__main__:Sending query to API: Show visitor counts for top 3 days in summer 2023
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): localhost:8080
+DEBUG:urllib3.connectionpool:http://localhost:8080 "POST /chat HTTP/1.1" 200 10861
+DEBUG:__main__:Received response for request b50b616a-3956-4152-9b7b-aaff7682a495

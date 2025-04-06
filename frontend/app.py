@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 def display_rag_flow(steps: List[Dict[str, Any]], visualization: Optional[str] = None):
     """Display the RAG flow steps and visualization"""
+    logger.debug(f"Displaying RAG flow with {len(steps)} steps")
     st.subheader("Analysis Process")
     
     # Create columns for steps and visualization
@@ -248,24 +249,39 @@ if 'should_clear_input' not in st.session_state:
     st.session_state.should_clear_input = False
 if 'user_input' not in st.session_state:
     st.session_state.user_input = ""
-if 'processing' not in st.session_state:
+if "processing" not in st.session_state:
     st.session_state.processing = False
-if 'last_request_id' not in st.session_state:
+if "last_request_id" not in st.session_state:
     st.session_state.last_request_id = None
+if "processed_queries" not in st.session_state:
+    st.session_state.processed_queries = set()
 
 def process_query(query: str):
     """Process a query and update the chat interface"""
     if not query:
         return
+
+    # Check if we've already processed this query in this session
+    if query in st.session_state.processed_queries:
+        logger.debug(f"Skipping already processed query: {query}")
+        return
+    
+    # Add to processed queries set immediately to prevent duplicate processing
+    st.session_state.processed_queries.add(query)
+    
+    # Generate a unique request ID to track this specific request
+    request_id = str(uuid.uuid4())
+    st.session_state.last_request_id = request_id
         
     # Add user message
-    st.session_state.messages.append({"role": "user", "content": query})
+    st.session_state.messages.append({"role": "user", "content": query, "request_id": request_id})
     st.session_state.processing = True
     
     try:
+        logger.debug(f"Sending query to API: {query}")
         # Make API call
         response = requests.post(
-            "http://localhost:8000/chat",
+            "http://localhost:8080/chat",
             json={"message": query},
             headers={"Content-Type": "application/json"}
         )
@@ -273,34 +289,41 @@ def process_query(query: str):
         if response.status_code == 200:
             try:
                 response_data = response.json()
+                logger.debug(f"Received response for request {request_id}")
                 
                 # Add bot response to chat
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": response_data.get("response", "Sorry, I couldn't generate a response."),
-                    "visualization": response_data.get("visualization")
+                    "visualization": response_data.get("visualization"),
+                    "request_id": request_id
                 })
                 
             except json.JSONDecodeError as e:
                 st.error(f"Error parsing response: {str(e)}")
                 st.session_state.messages.append({
                     "role": "assistant",
-                    "content": "Sorry, I encountered an error processing the response."
+                    "content": "Sorry, I encountered an error processing the response.",
+                    "request_id": request_id
                 })
         else:
             st.error(f"Error: Server returned status code {response.status_code}")
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": f"Sorry, there was an error processing your request. Status code: {response.status_code}"
+                "content": f"Sorry, there was an error processing your request. Status code: {response.status_code}",
+                "request_id": request_id
             })
     except requests.RequestException as e:
         st.error(f"Error connecting to server: {str(e)}")
         st.session_state.messages.append({
             "role": "assistant",
-            "content": "Sorry, I couldn't connect to the server. Please try again later."
+            "content": "Sorry, I couldn't connect to the server. Please try again later.",
+            "request_id": request_id
         })
     finally:
         st.session_state.processing = False
+        # Force a rerun to update the UI immediately
+        st.rerun()
 
 # Sidebar for chat history and settings
 with st.sidebar:
@@ -320,18 +343,21 @@ with st.sidebar:
         # Clear current messages
         st.session_state.messages = []
         st.session_state.current_conversation_index = len(st.session_state.conversations)
+        st.session_state.processed_queries = set()
     
     # Display saved conversations
     for i, conv in enumerate(st.session_state.conversations):
         if st.button(f"📝 {conv['timestamp']}: {conv['title']}", key=f"conv_{i}"):
             st.session_state.messages = conv["messages"].copy()
             st.session_state.current_conversation_index = i
+            st.session_state.processed_queries = set()  # Reset processed queries when switching conversations
     
     # Clear all chats button
     if st.button("🗑️ Clear All Chats"):
         st.session_state.messages = []
         st.session_state.conversations = []
         st.session_state.current_conversation_index = 0
+        st.session_state.processed_queries = set()
     
     st.markdown("---")
     st.markdown("### Settings")
@@ -340,6 +366,17 @@ with st.sidebar:
         ["claude"],
         index=0
     )
+    
+    # Add a debug mode toggle
+    if st.checkbox("Debug Mode", value=False):
+        st.write("Session State:")
+        st.write({
+            "messages_count": len(st.session_state.messages),
+            "conversations_count": len(st.session_state.conversations),
+            "current_index": st.session_state.current_conversation_index,
+            "processing": st.session_state.processing,
+            "processed_queries": list(st.session_state.processed_queries)[:5] + ["..."] if len(st.session_state.processed_queries) > 5 else list(st.session_state.processed_queries)
+        })
     
     st.markdown("---")
     st.markdown("### About")
@@ -362,41 +399,17 @@ Ask questions about:
 with st.sidebar:
     st.markdown("### Example questions:")
     example_questions = [
-        # Temporal Analysis
-        "What are the peak hours for tourist activity on weekends?",
-        "Show me the daily visitor trend during Christmas week 2023",
-        
-        # Comparative Analysis
-        "Compare tourist numbers between summer and winter seasons",
-        "How does tourist spending vary between Swiss and foreign visitors?",
-        
-        # Regional Analysis
-        "Which regions had the highest growth in tourism in 2023?",
-        "Show me the most popular tourist destinations by visitor count",
-        
-        # Demographic Analysis
-        "What's the age distribution of tourists during peak seasons?",
-        "Compare visitor demographics between urban and rural areas",
-        
-        # Event Impact Analysis
-        "How did major festivals affect local tourism numbers?",
-        "What was the tourism impact of the Montreux Jazz Festival?",
-        
-        # Economic Analysis
-        "What's the average tourist spending per day in different regions?",
-        "Show me the correlation between hotel prices and visitor numbers",
-        
-        # Transportation Analysis
-        "Which transportation methods are most used by tourists?",
-        "How do visitor numbers correlate with public transport usage?",
-        
-        # Weather Impact
-        "How does weather affect tourist numbers in mountain regions?",
-        "Compare visitor patterns between sunny and rainy days"
+        # New questions from the user
+        "What was the busiest week in spring 2023?",
+        "What day had the most visitors in 2023?", 
+        "Compare Swiss vs foreign tourists in April 2023",
+        "Which industry had the highest spending?",
+        "Show visitor counts for top 3 days in summer 2023"
     ]
     
     for q in example_questions:
         if st.button(q):
+            # Process the query directly, the duplicate check happens in process_query
             process_query(q)
 
 # Display chat messages
@@ -448,7 +461,7 @@ if st.session_state.processing:
 
 # Chat input using form
 with st.form(key="chat_form", clear_on_submit=True):
-    cols = st.columns([8, 1])
+    cols = st.columns([7, 2, 1])
     with cols[0]:
         user_input = st.text_input("Ask a question about tourism data:", 
                                   key="chat_input",
@@ -456,9 +469,20 @@ with st.form(key="chat_form", clear_on_submit=True):
                                   label_visibility="collapsed")
     with cols[1]:
         submit_button = st.form_submit_button("Send")
+    with cols[2]:
+        clear_button = st.form_submit_button("Clear Cache")
     
     if submit_button and user_input:
+        # Process the query directly, the duplicate check happens in process_query
         process_query(user_input)
+    
+    if clear_button:
+        # Clear session state cache to fix stuck responses
+        st.session_state.messages = []
+        st.session_state.processing = False
+        st.session_state.last_request_id = None
+        st.session_state.processed_queries = set()
+        st.rerun()
 
 # Footer
 st.markdown("---")

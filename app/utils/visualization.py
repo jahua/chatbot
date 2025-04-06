@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
 import json
-from app.utils.intent_parser import QueryIntent
+from .intent_parser import QueryIntent
 import plotly.graph_objects as go
 import traceback
 import numpy as np

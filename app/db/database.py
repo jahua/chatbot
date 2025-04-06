@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
-from app.core.config import settings
+from ..core.config import settings
 from typing import Dict, Any, Optional, List, Generator
 import pandas as pd
 import logging
@@ -100,6 +100,7 @@ class DatabaseService:
             with SessionLocal() as session:
                 result = session.execute(text(query), params or {})
                 rows = result.fetchall()
+                session.commit()  # Explicitly commit to ensure transaction completion
                 
                 if rows:
                     # Convert SQLAlchemy Row objects to dictionaries
@@ -122,6 +123,7 @@ class DatabaseService:
                 # Add EXPLAIN to analyze the query without executing
                 explain_query = f"EXPLAIN {query}"
                 session.execute(text(explain_query))
+                session.commit()  # Commit the transaction to avoid rollback
                 return True
         except Exception as e:
             logger.error(f"Error validating query: {str(e)}")

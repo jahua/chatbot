@@ -67,6 +67,7 @@ class DatabaseService:
                     
                     cur.execute(query)
                     results = cur.fetchall()
+                    conn.commit()  # Explicitly commit the transaction
                     # Cancel the alarm
                     signal.alarm(0)
                     return [dict(row) for row in results]
@@ -96,6 +97,7 @@ class DatabaseService:
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("EXPLAIN " + query)
+                    conn.commit()  # Explicitly commit the transaction
                     return True
         except psycopg2.Error as e:
             logger.error(f"Invalid query: {str(e)}")

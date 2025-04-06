@@ -1,34 +1,35 @@
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
-from app.db.database import SessionLocal, DatabaseService, get_db
-from app.llm.openai_adapter import OpenAIAdapter
-from app.schemas.chat import ChatMessage, ChatResponse
-from app.db.schema_manager import SchemaManager
+from ..db.database import SessionLocal, DatabaseService, get_db
+from ..llm.openai_adapter import OpenAIAdapter
+from ..schemas.chat import ChatMessage, ChatResponse
+from ..db.schema_manager import SchemaManager
 from sqlalchemy import text
 import pandas as pd
 import logging
 import traceback
 import asyncio
-from app.services.conversation_service import ConversationService
+from .conversation_service import ConversationService
 import json
 from datetime import datetime
 import time
 from fastapi import HTTPException
-from app.core.config import settings
+from ..core.config import settings
 from decimal import Decimal
 import uuid
-from app.utils.sql_utils import extract_sql_query, clean_sql_query
+from ..utils.sql_utils import extract_sql_query, clean_sql_query
 import re
 import psycopg2
 import plotly.graph_objects as go
-from app.utils.visualization import generate_visualization, DateTimeEncoder
-from app.utils.sql_generator import SQLGenerator
-from app.utils.db_utils import execute_query
-from app.utils.analysis_generator import generate_analysis_summary
-from app.utils.intent_parser import QueryIntent
-from app.services.database_service import DatabaseService
-from app.utils.intent_parser import IntentParser
-from app.models.chat_request import ChatRequest
+from ..utils.visualization import generate_visualization, DateTimeEncoder
+from ..utils.sql_generator import SQLGenerator
+from ..utils.db_utils import execute_query
+from ..utils.analysis_generator import generate_analysis_summary
+from ..utils.intent_parser import QueryIntent
+from .database_service import DatabaseService
+from ..utils.intent_parser import IntentParser
+from ..models.chat_request import ChatRequest
+from functools import lru_cache
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ class ChatService:
         self.sql_generator = SQLGenerator()
         self.db_service = db_service or DatabaseService()
         self.schema_manager = schema_manager
+        self._query_cache = {}  # Simple query cache
+        self._cache_ttl = 300  # Cache TTL in seconds (5 minutes)
         logger.info("ChatService initialized successfully")
 
     def is_conversational_message(self, message: str) -> bool:
@@ -156,7 +159,7 @@ class ChatService:
             logger.error(traceback.format_exc())
             return "I can help you analyze tourism data including visitor statistics and transaction data. Please ask a specific question about tourism patterns."
     
-    async def process_chat(self, message: str, session_id: str) -> Dict[str, Any]:
+    async def process_chat(self, message: str, session_id: str, is_direct_query: bool = False) -> Dict[str, Any]:
         """Process a chat message and return a response with visualization"""
         try:
             # Check if it's a conversational message
@@ -217,31 +220,45 @@ class ChatService:
                 
                 metadata = query_result.get('metadata', {})
                 
-                # Validate query
-                try:
-                    # Check if validate_query is available
-                    if hasattr(self.db_service, 'validate_query'):
-                        is_valid = self.db_service.validate_query(sql_query)
-                        if not is_valid:
-                            logger.error(f"Invalid SQL query: {sql_query}")
-                            return {
-                                'message_id': str(uuid.uuid4()),
-                                'content': "I couldn't generate a valid query for your question. Could you please rephrase it?",
-                                'response': "I couldn't generate a valid query for your question. Could you please rephrase it?",
-                                'visualization': None,
-                                'sql_query': sql_query,
-                                'status': 'error'
-                            }
-                    else:
-                        # Skip validation if method not available
-                        logger.warning("validate_query method not available, skipping validation")
-                except Exception as e:
-                    logger.error(f"Error during query validation: {str(e)}")
-                    logger.error(traceback.format_exc())
+                # Validate query - skip validation for direct API calls 
+                # to prevent the double-query issue
+                if not is_direct_query:
+                    try:
+                        # Check if validate_query is available
+                        # Skip validation for simple queries to reduce database load
+                        is_simple_query = len(sql_query.strip()) < 500 and "UNION" not in sql_query.upper() and "WITH" not in sql_query.upper()
+                        
+                        if hasattr(self.db_service, 'validate_query') and not is_simple_query:
+                            is_valid = self.db_service.validate_query(sql_query)
+                            if not is_valid:
+                                logger.error(f"Invalid SQL query: {sql_query}")
+                                return {
+                                    'message_id': str(uuid.uuid4()),
+                                    'content': "I couldn't generate a valid query for your question. Could you please rephrase it?",
+                                    'response': "I couldn't generate a valid query for your question. Could you please rephrase it?",
+                                    'visualization': None,
+                                    'sql_query': sql_query,
+                                    'status': 'error'
+                                }
+                        else:
+                            # Skip validation if method not available or query is simple
+                            logger.info(f"Skipping validation for query: {'simple query' if is_simple_query else 'validation not available'}")
+                    except Exception as e:
+                        logger.error(f"Error during query validation: {str(e)}")
+                        logger.error(traceback.format_exc())
+                else:
+                    logger.info(f"Skipping validation for direct API call")
                 
                 # Execute query and get data
                 try:
-                    data = self.db_service.execute_query(sql_query)
+                    # Check cache first
+                    cached_data = self._get_cached_query_result(sql_query)
+                    if cached_data is not None:
+                        data = cached_data
+                    else:
+                        data = self.db_service.execute_query(sql_query)
+                        # Cache the result for future use
+                        self._cache_query_result(sql_query, data)
                 except TimeoutError as e:
                     return {
                         'message_id': str(uuid.uuid4()),
@@ -548,4 +565,30 @@ class ChatService:
 
     def __del__(self):
         """Cleanup when the service is destroyed"""
-        self.close() 
+        self.close()
+
+    def _get_cached_query_result(self, sql_query):
+        """Get cached query result if available and not expired"""
+        if sql_query in self._query_cache:
+            cache_entry = self._query_cache[sql_query]
+            cache_time = cache_entry.get('timestamp', 0)
+            current_time = time.time()
+            
+            # Check if cache is still valid
+            if current_time - cache_time <= self._cache_ttl:
+                logger.debug(f"Using cached query result for: {sql_query[:100]}...")
+                return cache_entry.get('data')
+        
+        return None
+
+    def _cache_query_result(self, sql_query, data):
+        """Cache the query result with a timestamp"""
+        self._query_cache[sql_query] = {
+            'data': data,
+            'timestamp': time.time()
+        }
+        # Limit cache size to avoid memory issues
+        if len(self._query_cache) > 50:
+            # Simple strategy: remove oldest entries
+            oldest_key = min(self._query_cache.keys(), key=lambda k: self._query_cache[k]['timestamp'])
+            del self._query_cache[oldest_key] 
