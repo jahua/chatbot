@@ -4,7 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from langchain.tools import Tool
 from .base_agent import BaseAgent
-from app.llm.claude_adapter import claude_adapter
+from app.llm.openai_adapter import openai_adapter
 from langchain.llms.base import BaseLLM
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -25,7 +25,7 @@ class VisualizationOutput(BaseModel):
     error: Optional[str] = Field(description="Error message if visualization failed")
 
 class VisualizationAgent(BaseAgent):
-    def __init__(self, model_name: str = "claude"):
+    def __init__(self, model_name: str = "openai"):
         self.model_name = model_name
         self.llm = self._get_llm()
         self.traceable = get_traceable_decorator()
@@ -63,9 +63,9 @@ class VisualizationAgent(BaseAgent):
     
     def _get_llm(self) -> BaseLLM:
         """Get the appropriate LLM based on model name"""
-        if self.model_name == "claude":
-            from app.llm.claude_adapter import ClaudeAdapter
-            return ClaudeAdapter()
+        if self.model_name == "openai":
+            from app.llm.openai_adapter import OpenAIAdapter
+            return OpenAIAdapter()
         elif self.model_name == "gemini":
             from app.llm.gemini_adapter import GeminiAdapter
             return GeminiAdapter()

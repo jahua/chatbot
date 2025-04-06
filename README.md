@@ -1,6 +1,6 @@
 # Tourism Data Chatbot
 
-An intelligent chatbot system for analyzing tourism data in Switzerland, powered by Claude AI.
+An intelligent chatbot system for analyzing tourism data in Switzerland, powered by OpenAI.
 
 ## Features
 
@@ -18,7 +18,7 @@ An intelligent chatbot system for analyzing tourism data in Switzerland, powered
 - FastAPI
 - Streamlit
 - PostgreSQL
-- Claude AI
+- OpenAI
 - Plotly
 - Pandas
 - uv (fast Python package installer)

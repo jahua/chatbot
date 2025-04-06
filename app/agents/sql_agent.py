@@ -3,10 +3,7 @@ from langchain.tools import Tool
 from langchain_core.messages import HumanMessage, AIMessage
 from .base_agent import BaseAgent
 from app.db.database import get_db
-from app.llm.claude_adapter import claude_adapter
-from app.llm.gemini_adapter import gemini_adapter
-from app.llm.ollama_adapter import ollama_adapter
-from app.llm.vanna_adapter import vanna_adapter
+from app.llm.openai_adapter import openai_adapter
 from langchain.agents import AgentExecutor, create_sql_agent
 from langchain.agents.agent_toolkits import SQLDatabaseToolkit
 from langchain.sql_database import SQLDatabase
@@ -31,7 +28,7 @@ class SQLQueryOutput(BaseModel):
     error: Optional[str] = Field(description="Error message if query failed")
 
 class SQLAgent(BaseAgent):
-    def __init__(self, model_name: str = "claude"):
+    def __init__(self, model_name: str = "openai"):
         # Select the appropriate LLM based on model_name
         self.model_name = model_name
         self.llm = self._get_llm()
@@ -63,9 +60,9 @@ class SQLAgent(BaseAgent):
     
     def _get_llm(self) -> BaseLLM:
         """Get the appropriate LLM based on model name"""
-        if self.model_name == "claude":
-            from app.llm.claude_adapter import ClaudeAdapter
-            return ClaudeAdapter()
+        if self.model_name == "openai":
+            from app.llm.openai_adapter import OpenAIAdapter
+            return OpenAIAdapter()
         elif self.model_name == "gemini":
             from app.llm.gemini_adapter import GeminiAdapter
             return GeminiAdapter()

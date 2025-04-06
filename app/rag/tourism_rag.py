@@ -8,6 +8,7 @@ from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.utilities import SQLDatabase
 from langchain.chains import create_sql_query_chain
 from langchain.memory import ConversationBufferMemory
+from langchain_openai import ChatOpenAI
 from app.core.config import settings
 from app.db.schema_manager import schema_manager
 import logging
@@ -22,9 +23,16 @@ class TourismRAG:
             openai_api_base=settings.OPENAI_API_BASE
         )
         
+        # Initialize LLM
+        self.llm = ChatOpenAI(
+            model_name=settings.OPENAI_MODEL,
+            openai_api_key=settings.OPENAI_API_KEY,
+            openai_api_base=settings.OPENAI_API_BASE
+        )
+        
         # Initialize database connection
         self.db = SQLDatabase.from_uri(
-            f"postgresql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
+            f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
         )
         
         # Initialize memory

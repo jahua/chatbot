@@ -1,7 +1,7 @@
 from typing import Dict, Any, Optional, List
 from app.rag.tourism_rag import TourismRAG
 from app.core.config import settings
-from app.llm.claude_adapter import ClaudeAdapter
+from app.llm.openai_adapter import OpenAIAdapter
 import logging
 import json
 from datetime import datetime
@@ -20,7 +20,7 @@ class RAGService:
     def __init__(self, db: Session):
         self.db = db
         # Initialize LLM adapter
-        self.llm = ClaudeAdapter()
+        self.llm = OpenAIAdapter()
         
         # Initialize RAG pipeline
         self.rag = TourismRAG()
