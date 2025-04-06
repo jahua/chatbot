@@ -21,7 +21,7 @@ from app.utils.sql_utils import extract_sql_query, clean_sql_query
 import re
 import psycopg2
 import plotly.graph_objects as go
-from app.utils.visualization import generate_visualization
+from app.utils.visualization import generate_visualization, DateTimeEncoder
 from app.utils.sql_generator import SQLGenerator
 from app.utils.db_utils import execute_query
 from app.utils.analysis_generator import generate_analysis_summary
@@ -34,11 +34,12 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class ChatService:
-    def __init__(self):
+    def __init__(self, db_service=None, llm_adapter=None, schema_manager=None):
         """Initialize the chat service with OpenAI adapter and SQL generator"""
-        self.llm = OpenAIAdapter()
+        self.llm = llm_adapter or OpenAIAdapter()
         self.sql_generator = SQLGenerator()
-        self.db_service = DatabaseService()
+        self.db_service = db_service or DatabaseService()
+        self.schema_manager = schema_manager
         logger.info("ChatService initialized successfully")
 
     def is_conversational_message(self, message: str) -> bool:
@@ -108,10 +109,10 @@ class ChatService:
                 
         return False
     
-    async def get_schema_summary(self) -> str:
+    def get_schema_summary(self) -> str:
         """Generate a user-friendly summary of the database schema"""
         try:
-            schema_data = await self.get_schema_info()
+            schema_data = self.get_schema_info()
             
             # Organize schema by table
             tables = {}
@@ -161,41 +162,47 @@ class ChatService:
             # Check if it's a conversational message
             if self.is_conversational_message(message):
                 return {
+                    'message_id': str(uuid.uuid4()),
+                    'content': "I'm here to help you analyze tourism data. Please ask me about visitor statistics, spending patterns, or tourism trends!",
                     'response': "I'm here to help you analyze tourism data. Please ask me about visitor statistics, spending patterns, or tourism trends!",
                     'visualization': None,
                     'sql_query': None,
-                    'data': None,
-                    'analysis': None,
-                    'metadata': {'type': 'conversation'}
+                    'status': 'success'
                 }
 
             # Check if it's a schema inquiry
             if self.is_schema_inquiry(message):
-                schema_summary = await self.get_schema_summary()
+                schema_summary = self.get_schema_summary()
                 return {
+                    'message_id': str(uuid.uuid4()),
+                    'content': schema_summary,
                     'response': schema_summary,
                     'visualization': None,
                     'sql_query': None,
-                    'data': None,
-                    'analysis': None,
-                    'metadata': {'type': 'schema_info'}
+                    'status': 'success'
                 }
 
             # Generate SQL query based on user message
             try:
+                # Add original message to help with specific query optimizations
                 query_result = self.sql_generator.generate_sql_query(message)
+                
+                # If this is a parsing object, add the original message for context
+                if isinstance(query_result, dict) and not 'error' in query_result:
+                    query_result['original_message'] = message
+                    
                 logger.debug(f"Generated SQL query: {query_result}")
                 
                 if not query_result or 'error' in query_result:
                     error_msg = query_result.get('error', 'Unknown error in query generation') if query_result else 'Failed to generate query'
                     logger.error(f"SQL generation failed for message: {message}, error: {error_msg}")
                     return {
+                        'message_id': str(uuid.uuid4()),
+                        'content': "I couldn't understand your query. Could you please rephrase it?",
                         'response': "I couldn't understand your query. Could you please rephrase it?",
                         'visualization': None,
                         'sql_query': None,
-                        'data': None,
-                        'analysis': None,
-                        'metadata': {'type': 'error', 'reason': 'query_generation_failed', 'message': message, 'error': error_msg}
+                        'status': 'error'
                     }
                 
                 sql_query = query_result.get('query', '')
@@ -212,24 +219,38 @@ class ChatService:
                 
                 # Validate query
                 try:
-                    is_valid = await self.db_service.validate_query(sql_query)
-                    if not is_valid:
-                        logger.error(f"Invalid SQL query: {sql_query}")
-                        return {
-                            'response': "I couldn't generate a valid query for your question. Could you please rephrase it?",
-                            'visualization': None,
-                            'sql_query': sql_query,
-                            'data': None,
-                            'analysis': None,
-                            'metadata': {'type': 'error', 'reason': 'invalid_query', 'query': sql_query}
-                        }
+                    # Check if validate_query is available
+                    if hasattr(self.db_service, 'validate_query'):
+                        is_valid = self.db_service.validate_query(sql_query)
+                        if not is_valid:
+                            logger.error(f"Invalid SQL query: {sql_query}")
+                            return {
+                                'message_id': str(uuid.uuid4()),
+                                'content': "I couldn't generate a valid query for your question. Could you please rephrase it?",
+                                'response': "I couldn't generate a valid query for your question. Could you please rephrase it?",
+                                'visualization': None,
+                                'sql_query': sql_query,
+                                'status': 'error'
+                            }
+                    else:
+                        # Skip validation if method not available
+                        logger.warning("validate_query method not available, skipping validation")
                 except Exception as e:
                     logger.error(f"Error during query validation: {str(e)}")
                     logger.error(traceback.format_exc())
-                    is_valid = False
                 
                 # Execute query and get data
-                data = await self.db_service.execute_query(sql_query)
+                try:
+                    data = self.db_service.execute_query(sql_query)
+                except TimeoutError as e:
+                    return {
+                        'message_id': str(uuid.uuid4()),
+                        'content': str(e),
+                        'response': str(e),
+                        'visualization': None,
+                        'sql_query': sql_query,
+                        'status': 'error'
+                    }
                 
                 if not data:
                     # Check if this is a future date query
@@ -238,27 +259,27 @@ class ChatService:
                     
                     if start_date and datetime.strptime(start_date, '%Y-%m-%d') > datetime.now():
                         return {
+                            'message_id': str(uuid.uuid4()),
+                            'content': f"I don't have data for future dates like {start_date}. Would you like to see data from a past period instead?",
                             'response': f"I don't have data for future dates like {start_date}. Would you like to see data from a past period instead?",
                             'visualization': None,
                             'sql_query': sql_query,
-                            'data': None,
-                            'analysis': None,
-                            'metadata': {'type': 'future_date', 'start_date': start_date}
+                            'status': 'error'
                         }
                     
                     return {
+                        'message_id': str(uuid.uuid4()),
+                        'content': "I couldn't find any data matching your query.",
                         'response': "I couldn't find any data matching your query.",
                         'visualization': None,
                         'sql_query': sql_query,
-                        'data': None,
-                        'analysis': None,
-                        'metadata': {'type': 'no_data', **metadata}
+                        'status': 'error'
                     }
                 
                 # Generate visualization based on intent and data
                 try:
                     visualization_data = generate_visualization(data, intent)
-                    visualization_json = visualization_data
+                    visualization_json = json.dumps(visualization_data, cls=DateTimeEncoder) if visualization_data else None
                 except Exception as viz_error:
                     logger.error(f"Error generating visualization: {str(viz_error)}")
                     logger.error(traceback.format_exc())
@@ -268,44 +289,54 @@ class ChatService:
                 analysis = self._generate_analysis(data, intent, metadata)
                 
                 return {
-                    'response': "Here's what I found based on your query.",
+                    'message_id': str(uuid.uuid4()),
+                    'content': analysis,
+                    'response': analysis,
                     'visualization': visualization_json,
                     'sql_query': sql_query,
-                    'data': data,
-                    'analysis': analysis,
-                    'metadata': {'type': 'success', **metadata}
+                    'status': 'success'
                 }
                 
+            except TimeoutError as e:
+                logger.error(f"Query execution timed out: {str(e)}")
+                return {
+                    'message_id': str(uuid.uuid4()),
+                    'content': str(e),
+                    'response': str(e),
+                    'visualization': None,
+                    'sql_query': None,
+                    'status': 'error'
+                }
             except Exception as e:
                 logger.error(f"Error processing SQL generation: {str(e)}")
                 logger.error(traceback.format_exc())
                 return {
+                    'message_id': str(uuid.uuid4()),
+                    'content': "Sorry, I encountered an error while processing your request.",
                     'response': "Sorry, I encountered an error while processing your request.",
                     'visualization': None,
                     'sql_query': None,
-                    'data': None,
-                    'analysis': None,
-                    'metadata': {'type': 'error', 'reason': 'processing_error', 'error': str(e)}
+                    'status': 'error'
                 }
             
         except Exception as e:
             logger.error(f"Error processing chat message: {str(e)}")
             logger.error(traceback.format_exc())
             return {
+                'message_id': str(uuid.uuid4()),
+                'content': "Sorry, I encountered an error while processing your request.",
                 'response': "Sorry, I encountered an error while processing your request.",
                 'visualization': None,
                 'sql_query': None,
-                'data': None,
-                'analysis': None,
-                'metadata': {'type': 'error', 'reason': 'processing_error', 'error': str(e)}
+                'status': 'error'
             }
     
-    async def get_schema_info(self) -> List[Dict[str, Any]]:
+    def get_schema_info(self) -> List[Dict[str, Any]]:
         """
         Get database schema information
         """
         try:
-            return await self.db_service.get_schema_info()
+            return self.db_service.get_schema_info()
         except Exception as e:
             logger.error(f"Error getting schema info: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -426,28 +457,89 @@ class ChatService:
             if not data:
                 return "No data available for analysis."
             
-            # Try to find numeric columns
-            numeric_cols = [k for k, v in data[0].items() if isinstance(v, (int, float))]
+            # Log data structure for debugging
+            logger.debug(f"Analyze default data first item: {data[0]}")
+            logger.debug(f"Analyze default data keys: {data[0].keys()}")
             
+            # Try to find numeric columns - handle both numeric types and string representations
+            numeric_cols = []
+            
+            for k, v in data[0].items():
+                # Direct numeric types
+                if isinstance(v, (int, float)):
+                    numeric_cols.append(k)
+                # String representations of numbers
+                elif isinstance(v, str):
+                    try:
+                        float(v)  # Test if it can be converted
+                        numeric_cols.append(k)
+                    except ValueError:
+                        pass
+            
+            # Common numeric columns we want to prioritize
+            priority_cols = ['total_visitors', 'swiss_tourists', 'foreign_tourists', 'total_spending']
+            
+            # Prioritize certain columns if they exist
+            for col in priority_cols:
+                if col in numeric_cols:
+                    # Use this column for analysis
+                    values = []
+                    for d in data:
+                        try:
+                            val = d.get(col, 0)
+                            if isinstance(val, str):
+                                val = float(val)
+                            values.append(val)
+                        except (ValueError, TypeError):
+                            values.append(0)
+                    
+                    if values:
+                        total = sum(values)
+                        avg = total / len(values)
+                        max_val = max(values)
+                        min_val = min(values)
+                        
+                        return (
+                            f"The {col.replace('_', ' ')} data shows a total of {total:,.0f} "
+                            f"with an average of {avg:,.0f}. Values range from {min_val:,.0f} "
+                            f"to {max_val:,.0f}."
+                        )
+            
+            # If no priority columns, use any numeric column
             if numeric_cols:
                 col = numeric_cols[0]
-                values = [d.get(col, 0) for d in data]
-                total = sum(values)
-                avg = total / len(values)
-                max_val = max(values)
-                min_val = min(values)
+                values = []
+                for d in data:
+                    try:
+                        val = d.get(col, 0)
+                        if isinstance(val, str):
+                            val = float(val)
+                        values.append(val)
+                    except (ValueError, TypeError):
+                        values.append(0)
                 
-                return (
-                    f"The {col.replace('_', ' ')} data shows a total of {total:,.2f} "
-                    f"with an average of {avg:,.2f}. Values range from {min_val:,.2f} "
-                    f"to {max_val:,.2f}."
-                )
-            else:
-                return "No numeric data available for analysis."
+                if values:
+                    total = sum(values)
+                    avg = total / len(values)
+                    max_val = max(values)
+                    min_val = min(values)
+                    
+                    return (
+                        f"The {col.replace('_', ' ')} data shows a total of {total:,.0f} "
+                        f"with an average of {avg:,.0f}. Values range from {min_val:,.0f} "
+                        f"to {max_val:,.0f}."
+                    )
+            
+            # If we get here, check if 'date' column exists for time-based analysis
+            if 'date' in data[0]:
+                return f"Data available for {len(data)} time periods. Please ask for specific metrics like visitor counts, trends, or spending information."
+                
+            return "No numeric data available for analysis. Please try a more specific query."
                 
         except Exception as e:
             logger.error(f"Error generating default analysis: {str(e)}")
-            return "Error analyzing data."
+            logger.error(traceback.format_exc())
+            return "Error generating analysis. Please try a more specific query."
     
     def close(self):
         """Close database connection"""

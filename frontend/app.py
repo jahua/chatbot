@@ -409,8 +409,35 @@ for message in st.session_state.messages:
             if "visualization" in message and message["visualization"]:
                 try:
                     st.markdown('<div class="visualization-container">', unsafe_allow_html=True)
-                    image = Image.open(BytesIO(base64.b64decode(message["visualization"])))
-                    st.image(image, use_column_width=True)
+                    # Check if the visualization is a JSON string (Plotly chart)
+                    try:
+                        vis_data = json.loads(message["visualization"])
+                        # Create a plotly figure from the JSON
+                        fig = go.Figure(vis_data)
+                        # Ensure the figure has correct layout settings for dark mode
+                        fig.update_layout(
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            plot_bgcolor='rgba(42,43,50,1)',
+                            font=dict(color='#ECECF1'),
+                            margin=dict(l=20, r=20, t=40, b=20)
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except (json.JSONDecodeError, TypeError, ValueError) as e:
+                        st.error(f"Error processing visualization: {str(e)}")
+                        st.text(f"Raw visualization data type: {type(message['visualization'])}")
+                        # If not a valid JSON, try as base64 image
+                        try:
+                            if isinstance(message["visualization"], str):
+                                # Ensure the string is proper base64 by padding if necessary
+                                visualization = message["visualization"]
+                                # Add padding if needed
+                                padding = len(visualization) % 4
+                                if padding:
+                                    visualization += '=' * (4 - padding)
+                                image = Image.open(BytesIO(base64.b64decode(visualization)))
+                                st.image(image, use_column_width=True)
+                        except Exception as img_error:
+                            st.error(f"Could not display visualization: {str(img_error)}")
                     st.markdown('</div>', unsafe_allow_html=True)
                 except Exception as e:
                     st.error(f"Error displaying visualization: {str(e)}")
