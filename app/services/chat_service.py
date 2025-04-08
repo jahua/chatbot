@@ -327,14 +327,14 @@ class ChatService:
             except Exception as e:
                 logger.error(f"Error processing SQL generation: {str(e)}")
                 logger.error(traceback.format_exc())
-                return {
+            return {
                     'message_id': str(uuid.uuid4()),
                     'content': "Sorry, I encountered an error while processing your request.",
                     'response': "Sorry, I encountered an error while processing your request.",
                     'visualization': None,
                     'sql_query': None,
                     'status': 'error'
-                }
+            }
             
         except Exception as e:
             logger.error(f"Error processing chat message: {str(e)}")

@@ -281,7 +281,7 @@ def process_query(query: str):
         logger.debug(f"Sending query to API: {query}")
         # Make API call
         response = requests.post(
-            "http://localhost:8080/chat",
+            "http://localhost:8000/chat",
             json={"message": query},
             headers={"Content-Type": "application/json"}
         )

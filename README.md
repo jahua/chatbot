@@ -130,6 +130,11 @@ uv pip install -r requirements.txt
 # Create a virtual environment
 uv venv venv311
 ```
+# Run backend server with uv
+uv run uvicorn app.main:app
+
+# Run frontend with uv
+uv run streamlit run app.py
 
 ## Project Structure
 
