@@ -68,3 +68,9 @@ docker-compose.override.yml
 
 # Frontend packages
 frontend/node_modules/
+
+# Local notes directory
+note/
+
+# OS
+Thumbs.db
