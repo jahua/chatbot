@@ -1,18 +1,30 @@
 from typing import Dict, Any, List, Optional
-from enum import Enum
+from enum import Enum, auto
 import re
 from datetime import datetime, timedelta
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
 class QueryIntent(Enum):
-    VISITOR_COUNT = "visitor_count"
+    """Enum for different query intents"""
     VISITOR_COMPARISON = "visitor_comparison"
-    SPENDING_ANALYSIS = "spending_analysis"
-    CORRELATION_ANALYSIS = "correlation_analysis"
     PEAK_PERIOD = "peak_period"
+    SPENDING = "spending"
+    TREND = "trend"
+    REGION_ANALYSIS = "region_analysis"
+    HOTSPOT_DETECTION = "hotspot_detection"
+    SPATIAL_PATTERN = "spatial_pattern"
+    INDUSTRY_ANALYSIS = "industry_analysis"
+    VISITOR_COUNT = "visitor_count"
+    GEO_SPATIAL = "geo_spatial"
+    SPENDING_ANALYSIS = "spending_analysis"
     TREND_ANALYSIS = "trend_analysis"
+    CORRELATION_ANALYSIS = "correlation_analysis"
+    
+    def __str__(self):
+        return self.value
 
 class TimeGranularity(Enum):
     DAY = "day"
@@ -55,50 +67,68 @@ class IntentParser:
             "peak": r"(peak|busiest|most)"
         }
     
-    def parse_query_intent(self, user_message: str) -> Dict[str, Any]:
-        """
-        Parse the user's message to determine the query intent, time range, and granularity
-        Return a dictionary with the parsed intent information
-        """
+    def parse_query_intent(self, message: str) -> Dict[str, Any]:
+        """Parse user message to determine intent and extract parameters"""
         try:
-            # Convert message to lowercase for easier matching
-            message = user_message.lower()
+            message = message.lower()
             
-            # Initialize the result dictionary
-            result = {
-                "intent": QueryIntent.VISITOR_COUNT,  # Default intent
-                "time_range": {},
-                "granularity": self._detect_time_granularity(message),
-                "comparison_type": None
+            # Check for geospatial queries first
+            geo_keywords = ['map', 'region', 'hotspot', 'spatial', 'geographic', 'location', 'area', 
+                           'place', 'zone', 'territory', 'district', 'canton', 'where', 'ticino', 
+                           'zurich', 'lugano', 'show me']
+                           
+            if any(keyword in message for keyword in geo_keywords):
+                if 'hotspot' in message or 'busiest' in message or 'most visited' in message:
+                    intent = QueryIntent.HOTSPOT_DETECTION
+                elif ('region' in message or 'area' in message) and not any(term in message for term in ['pattern', 'distribution']):
+                    intent = QueryIntent.REGION_ANALYSIS
+                elif 'pattern' in message or 'distribution' in message or 'spread' in message:
+                    intent = QueryIntent.SPATIAL_PATTERN
+                else:
+                    intent = QueryIntent.GEO_SPATIAL
+                
+                # Extract region information
+                region_info = self._extract_region_info(message)
+                
+                return {
+                    'intent': intent,
+                    'time_range': self._extract_time_range(message),
+                    'granularity': self._detect_time_granularity(message),
+                    'region_info': region_info
+                }
+            
+            # Check for spending/transaction queries
+            spending_keywords = ['spending', 'spend', 'transaction', 'purchase', 'mastercard', 'txn', 
+                                'amount', 'payment', 'money', 'currency', 'dollar', 'euro', 'chf', 
+                                'bought', 'price', 'cost', 'expense', 'expenditure', 'industry']
+                                
+            if any(keyword in message for keyword in spending_keywords):
+                return {
+                    'intent': QueryIntent.SPENDING_ANALYSIS,
+                    'time_range': self._extract_time_range(message),
+                    'granularity': self._detect_time_granularity(message)
+                }
+            
+            # Handle other query types
+            if 'peak' in message or 'busiest' in message or 'top day' in message or 'most visitors' in message:
+                intent = QueryIntent.PEAK_PERIOD
+            elif 'compare' in message or 'versus' in message or 'vs' in message or 'difference between' in message:
+                intent = QueryIntent.VISITOR_COMPARISON
+            elif 'trend' in message or 'over time' in message or 'pattern' in message or 'change' in message:
+                intent = QueryIntent.TREND_ANALYSIS
+            else:
+                intent = QueryIntent.VISITOR_COUNT
+            
+            return {
+                'intent': intent,
+                'time_range': self._extract_time_range(message),
+                'granularity': self._detect_time_granularity(message),
+                'comparison_type': self._determine_comparison_type(message)
             }
             
-            # Detect spending analysis intent
-            spending_keywords = ["spending", "spend", "transaction", "purchase", "revenue"]
-            spending_match = any(keyword in message for keyword in spending_keywords)
-            
-            if spending_match:
-                result["intent"] = QueryIntent.SPENDING_ANALYSIS
-                
-                # Check for industry focus for spending analysis
-                if "industry" in message and ("highest" in message or "top" in message):
-                    # Store the original message for context
-                    result["original_message"] = user_message
-            
-            # If message contains "peak" keywords, set intent to peak period analysis
-            peak_keywords = ["peak", "busiest", "most visited", "most popular", "highest attendance", "most tourists"]
-            if any(keyword in message for keyword in peak_keywords):
-                result["intent"] = QueryIntent.PEAK_PERIOD
-            
-            # Extract time range information (existing code)
-            result["time_range"] = self._extract_time_range(message)
-            
-            # Generate SQL components for the intent
-            result["sql_components"] = self._generate_sql_components(message, result["intent"], result["time_range"], result["granularity"])
-            
-            return result
         except Exception as e:
             logger.error(f"Error parsing query intent: {str(e)}")
-            return {"error": f"Failed to parse your question: {str(e)}. Please try phrasing it differently."}
+            return {'intent': QueryIntent.VISITOR_COUNT}
     
     def _extract_time_range(self, query: str) -> Dict[str, str]:
         """Extract time range information from the query"""
@@ -162,6 +192,78 @@ class IntentParser:
         else:
             return "time"
     
+    def _extract_region_info(self, query: str) -> Dict[str, str]:
+        """Extract region information from the query"""
+        region_info = {"region_name": None, "region_type": None}
+        
+        # Look for common region types followed by names
+        region_patterns = [
+            (r"(?:in|of|for|at)\s+(?:the\s+)?(\w+(?:\s+\w+){0,3}?)\s+(?:region|area|district|canton)", "region"),
+            (r"(?:city|town)\s+of\s+(\w+(?:\s+\w+){0,2})", "city"),
+            (r"(?:in|of|for|at)\s+(?:the\s+)?(\w+(?:\s+\w+){0,2})", "region")  # Generic fallback
+        ]
+        
+        # Common Swiss regions
+        known_regions = {
+            "ticino": "canton",
+            "tessin": "canton",
+            "zurich": "canton",
+            "zürich": "canton",
+            "lucerne": "canton",
+            "luzern": "canton",
+            "geneva": "canton",
+            "lugano": "city",
+            "locarno": "city",
+            "bellinzona": "city",
+            "ascona": "city",
+            "swiss alps": "region",
+            "alps": "region", 
+            "switzerland": "country"
+        }
+        
+        # First check if any known regions are mentioned
+        for region, region_type in known_regions.items():
+            if region.lower() in query.lower():
+                region_info["region_name"] = region
+                region_info["region_type"] = region_type
+                return region_info
+        
+        # If no known regions, try pattern matching
+        for pattern, region_type in region_patterns:
+            match = re.search(pattern, query, re.IGNORECASE)
+            if match:
+                region_info["region_name"] = match.group(1).strip()
+                region_info["region_type"] = region_type
+                return region_info
+        
+        # Default to Ticino if no region found
+        region_info["region_name"] = "Ticino"
+        region_info["region_type"] = "canton"
+        return region_info
+    
+    def _get_date_expression_for_granularity(self, granularity: TimeGranularity) -> str:
+        """Get the appropriate SQL date expression for a given granularity"""
+        if granularity == TimeGranularity.DAY:
+            return "aoi_date::date"
+        elif granularity == TimeGranularity.WEEK:
+            return "date_trunc('week', aoi_date)::date"
+        elif granularity == TimeGranularity.MONTH:
+            return "date_trunc('month', aoi_date)::date"
+        elif granularity == TimeGranularity.SEASON:
+            # For seasons, we use a more complex expression with CASE statements
+            return """
+                CASE 
+                    WHEN EXTRACT(MONTH FROM aoi_date) BETWEEN 3 AND 5 THEN CONCAT(EXTRACT(YEAR FROM aoi_date), '-Spring')
+                    WHEN EXTRACT(MONTH FROM aoi_date) BETWEEN 6 AND 8 THEN CONCAT(EXTRACT(YEAR FROM aoi_date), '-Summer')
+                    WHEN EXTRACT(MONTH FROM aoi_date) BETWEEN 9 AND 11 THEN CONCAT(EXTRACT(YEAR FROM aoi_date), '-Fall')
+                    ELSE CONCAT(EXTRACT(YEAR FROM aoi_date), '-Winter')
+                END
+            """
+        elif granularity == TimeGranularity.YEAR:
+            return "EXTRACT(YEAR FROM aoi_date)::text"
+        else:
+            return "aoi_date::date"
+
     def _generate_sql_components(self, message: str, intent: QueryIntent, time_range: Dict[str, str], granularity: TimeGranularity) -> Dict[str, str]:
         """Generate SQL components based on intent and parameters"""
         components = {}
@@ -212,19 +314,4 @@ class IntentParser:
             components["order_by_clause"] = "ORDER BY total_visitors DESC"
             components["limit_clause"] = "LIMIT 10"
             
-        return components
-        
-    def _get_date_expression_for_granularity(self, granularity: TimeGranularity) -> str:
-        """Get the appropriate SQL expression for the date based on granularity"""
-        if granularity == TimeGranularity.DAY:
-            return "aoi_date"
-        elif granularity == TimeGranularity.WEEK:
-            return "DATE_TRUNC('week', aoi_date)"
-        elif granularity == TimeGranularity.MONTH:
-            return "DATE_TRUNC('month', aoi_date)"
-        elif granularity == TimeGranularity.SEASON:
-            return "DATE_TRUNC('quarter', aoi_date)"
-        elif granularity == TimeGranularity.YEAR:
-            return "DATE_TRUNC('year', aoi_date)"
-        else:
-            return "aoi_date" 
+        return components 

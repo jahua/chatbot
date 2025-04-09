@@ -25,10 +25,28 @@ class SchemaContextManager:
                         "description": "JSON object containing visitor counts by type",
                         "fields": {
                             "swissTourist": {"type": "numeric", "description": "Number of Swiss tourists"},
-                            "foreignTourist": {"type": "numeric", "description": "Number of foreign tourists"}
+                            "foreignTourist": {"type": "numeric", "description": "Number of foreign tourists"},
+                            "swissLocal": {"type": "numeric", "description": "Number of Swiss local residents"},
+                            "foreignWorker": {"type": "numeric", "description": "Number of foreign workers"},
+                            "swissCommuter": {"type": "numeric", "description": "Number of Swiss commuters"}
                         },
                         "access_pattern": "visitors->>'field_name'",
                         "cast_pattern": "(visitors->>'field_name')::numeric"
+                    },
+                    "dwelltimes": {
+                        "type": "jsonb",
+                        "description": "Tourist dwell time distribution in hourly buckets",
+                        "fields": {
+                            "0.5-1h": {"type": "numeric", "description": "Visitors staying 0.5-1 hours"},
+                            "1-2h": {"type": "numeric", "description": "Visitors staying 1-2 hours"},
+                            "2-3h": {"type": "numeric", "description": "Visitors staying 2-3 hours"},
+                            "3-4h": {"type": "numeric", "description": "Visitors staying 3-4 hours"},
+                            "4-5h": {"type": "numeric", "description": "Visitors staying 4-5 hours"},
+                            "5-6h": {"type": "numeric", "description": "Visitors staying 5-6 hours"},
+                            "6-7h": {"type": "numeric", "description": "Visitors staying 6-7 hours"},
+                            "7-8h": {"type": "numeric", "description": "Visitors staying 7-8 hours"},
+                            "8-24h": {"type": "numeric", "description": "Visitors staying 8-24 hours"}
+                        }
                     }
                 }
             },
@@ -38,10 +56,20 @@ class SchemaContextManager:
                 "date_columns": ["txn_date"],
                 "description": "Contains transaction data from credit card usage",
                 "columns": {
+                    "id": {"type": "integer", "description": "Primary key"},
                     "txn_date": {"type": "date", "description": "Date of the transaction"},
                     "industry": {"type": "text", "description": "Industry sector of the transaction"},
-                    "txn_amt": {"type": "numeric", "description": "Total transaction amount"},
-                    "txn_cnt": {"type": "numeric", "description": "Number of transactions"}
+                    "segment": {"type": "text", "description": "Market segment (overall, domestic, international)"},
+                    "txn_amt": {"type": "numeric", "description": "Total transaction amount (indexed to 2018)"},
+                    "txn_cnt": {"type": "numeric", "description": "Number of transactions"},
+                    "acct_cnt": {"type": "numeric", "description": "Number of distinct cards"},
+                    "avg_ticket": {"type": "numeric", "description": "Average spend per transaction"},
+                    "avg_freq": {"type": "numeric", "description": "Average transactions per card"},
+                    "avg_spend": {"type": "numeric", "description": "Average spend per card"},
+                    "geo_type": {"type": "text", "description": "Geographic type"},
+                    "geo_name": {"type": "text", "description": "Geographic location name"},
+                    "central_latitude": {"type": "numeric", "description": "Tile center latitude"},
+                    "central_longitude": {"type": "numeric", "description": "Tile center longitude"}
                 }
             }
         }
@@ -50,9 +78,12 @@ class SchemaContextManager:
         self.relationships = {
             "aoi_days_raw": {
                 "master_card": {
-                    "type": "one-to-many",
-                    "join_conditions": ["aoi_days_raw.aoi_date = master_card.txn_date"],
-                    "description": "Relates visitor data to transaction data on the same date"
+                    "type": "spatial-temporal",
+                    "join_conditions": [
+                        "aoi_days_raw.aoi_date = master_card.txn_date",
+                        "ST_DWithin(ST_MakePoint(master_card.central_longitude, master_card.central_latitude), ST_MakePoint(aoi_days_raw.longitude, aoi_days_raw.latitude), 0.01)"
+                    ],
+                    "description": "Relates visitor data to transaction data based on date and spatial proximity"
                 }
             }
         }
@@ -79,19 +110,65 @@ class SchemaContextManager:
                     "order_clause": ["{date_alias}", "total_visitors DESC"]
                 }
             },
-            "visitor_comparison": {
-                "description": "Compare Swiss and foreign visitors over time",
+            "spending_analysis": {
+                "description": "Analyze spending patterns by industry and location",
                 "template": """
                     SELECT 
                         {date_grouping} as {date_alias},
-                        SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
-                        SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
-                        (SUM((visitors->>'swissTourist')::numeric) / NULLIF(SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric), 0) * 100) as swiss_percentage
-                    FROM data_lake.aoi_days_raw
+                        industry,
+                        geo_name,
+                        SUM(txn_amt) as total_spend,
+                        SUM(txn_cnt) as transaction_count,
+                        AVG(avg_ticket) as avg_transaction_value
+                    FROM data_lake.master_card
                     {where_clause}
-                    GROUP BY {date_alias}
-                    ORDER BY {date_alias};
-                """
+                    GROUP BY {date_alias}, industry, geo_name
+                    ORDER BY {order_clause};
+                """,
+                "parameters": {
+                    "date_grouping": ["txn_date", "DATE_TRUNC('day', txn_date)", "DATE_TRUNC('week', txn_date)", "DATE_TRUNC('month', txn_date)"],
+                    "date_alias": ["date", "day", "week", "month"],
+                    "where_clause": "WHERE txn_date BETWEEN '{start_date}' AND '{end_date}'",
+                    "order_clause": ["total_spend DESC", "transaction_count DESC"]
+                }
+            },
+            "combined_analysis": {
+                "description": "Combine visitor and spending data for comprehensive analysis",
+                "template": """
+                    WITH visitor_data AS (
+                        SELECT 
+                            aoi_date,
+                            SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
+                            SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists
+                        FROM data_lake.aoi_days_raw
+                        {visitor_where_clause}
+                        GROUP BY aoi_date
+                    ),
+                    spending_data AS (
+                        SELECT 
+                            txn_date,
+                            industry,
+                            SUM(txn_amt) as total_spend,
+                            SUM(txn_cnt) as transaction_count
+                        FROM data_lake.master_card
+                        {spending_where_clause}
+                        GROUP BY txn_date, industry
+                    )
+                    SELECT 
+                        v.aoi_date,
+                        v.swiss_tourists,
+                        v.foreign_tourists,
+                        s.industry,
+                        s.total_spend,
+                        s.transaction_count
+                    FROM visitor_data v
+                    LEFT JOIN spending_data s ON v.aoi_date = s.txn_date
+                    ORDER BY v.aoi_date DESC, s.total_spend DESC;
+                """,
+                "parameters": {
+                    "visitor_where_clause": "WHERE aoi_date BETWEEN '{start_date}' AND '{end_date}'",
+                    "spending_where_clause": "WHERE txn_date BETWEEN '{start_date}' AND '{end_date}'"
+                }
             }
         }
     

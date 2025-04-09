@@ -2,7 +2,7 @@ from sqlalchemy import create_engine, text, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from ..core.config import settings
-from typing import Dict, Any, Optional, List, Generator
+from typing import Dict, Any, Optional, List, Generator, Union, Tuple
 import pandas as pd
 import logging
 import traceback
@@ -93,27 +93,36 @@ class DatabaseService:
         # No need to explicitly close with SQLAlchemy connection pooling
         pass
         
-    def execute_query(self, query: str, params=None):
-        """Execute a SQL query and return the results"""
-        start_time = time.time()
+    def execute_query(self, query: str, params: Optional[Union[Dict, List, Tuple]] = None) -> List[Dict]:
+        """Execute a SQL query and return results as a list of dictionaries."""
         try:
-            with SessionLocal() as session:
-                result = session.execute(text(query), params or {})
-                rows = result.fetchall()
-                session.commit()  # Explicitly commit to ensure transaction completion
+            logger.debug(f"Executing query: {query}")
+            logger.debug(f"With parameters: {params}")
+            
+            with self.engine.connect() as connection:
+                # Convert params to the correct format for SQLAlchemy
+                if params is not None:
+                    if isinstance(params, (list, tuple)):
+                        # Convert list/tuple to dict with numbered parameters
+                        params = {f"param_{i}": val for i, val in enumerate(params)}
+                        # Replace %s with :param_N in the query
+                        for i in range(len(params)):
+                            query = query.replace("%s", f":param_{i}")
+                    elif not isinstance(params, dict):
+                        params = {"param": params}
+                        query = query.replace("%s", ":param")
                 
-                if rows:
-                    # Convert SQLAlchemy Row objects to dictionaries
-                    column_names = result.keys()
-                    return [dict(zip(column_names, row)) for row in rows]
-                return []
+                # Execute query with proper parameter binding
+                result = connection.execute(text(query), params or {})
+                
+                # Convert result rows to dictionaries safely
+                return [row._asdict() for row in result]
+                
         except Exception as e:
-            execution_time = time.time() - start_time
-            # Check if it's likely a timeout
-            if execution_time >= 14.5:  # Just under our 15s timeout
-                logger.warning(f"Query execution timed out after {execution_time:.1f} seconds")
-                raise TimeoutError("Query execution timed out. Please try a more specific query or add filters.")
             logger.error(f"Error executing query: {str(e)}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Parameters: {params}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
             
     def validate_query(self, query: str):

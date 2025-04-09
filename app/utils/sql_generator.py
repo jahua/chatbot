@@ -95,8 +95,8 @@ class SQLGenerator:
     
     def generate_sql_query(self, user_message: str) -> Dict[str, Any]:
         """
-        Generate a SQL query based on the user's message
-        Returns a dictionary containing the query and metadata
+        Generate an SQL query based on the user's message
+        Returns a dictionary with the query, intent, and metadata
         """
         try:
             # Parse the user's intent
@@ -108,14 +108,11 @@ class SQLGenerator:
             
             logger.debug(f"Parsed intent: {parsed_intent}")
             
+            # Add original message to intent object
+            parsed_intent["original_message"] = user_message
+            
             # Handle special case for highest spending industry - go directly to optimized method
             if "highest" in user_message.lower() and "industry" in user_message.lower() and "spending" in user_message.lower():
-                # Extract time information
-                time_range = parsed_intent.get("time_range", {})
-                
-                # Add original message to intent object
-                parsed_intent["original_message"] = user_message
-                
                 # Use specialized function for this common query
                 return self._generate_spending_analysis_query(parsed_intent)
             
@@ -161,6 +158,7 @@ class SQLGenerator:
             
             result = {
                 "query": complete_query,
+                "sql": complete_query,  # Add 'sql' key for backward compatibility
                 "intent": intent_str,
                 "metadata": {
                     "time_range": parsed_intent["time_range"],
@@ -253,43 +251,44 @@ class SQLGenerator:
         components = {}
         where_clause = self._build_where_clause(parsed_intent)
         
-        if parsed_intent["intent"] == QueryIntent.SPENDING_ANALYSIS:
-            # Use the optimized query generator for spending analysis
-            result = self._generate_spending_analysis_query(parsed_intent)
-            components["select_clause"] = result["query"]
-            components["from_clause"] = ""  # Already included in the query
-            components["where_clause"] = ""  # Already included in the query
-            components["group_by_clause"] = ""  # Already included in the query
-            components["order_by_clause"] = ""  # Already included in the query
-            components["limit_clause"] = ""  # Already included in the query
-        
-        elif parsed_intent["intent"] == QueryIntent.VISITOR_COUNT:
-            # Generate query for visitor count analysis
-            date_format = self._get_date_format_for_granularity(parsed_intent.get("granularity", TimeGranularity.DAY))
-            
-            components["select_clause"] = f"""
+        if parsed_intent["intent"] == QueryIntent.GEO_SPATIAL or parsed_intent["intent"] == QueryIntent.REGION_ANALYSIS or parsed_intent["intent"] == QueryIntent.HOTSPOT_DETECTION or parsed_intent["intent"] == QueryIntent.SPATIAL_PATTERN:
+            # Generate query for geospatial analysis
+            components["select_clause"] = """
                 SELECT 
-                    {date_format} as date,
-                    SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
-                    SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
-                    SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) as total_visitors
+                    id as region_id,
+                    name as region_name,
+                    type as region_type,
+                    ST_AsGeoJSON(geometry) as geometry,
+                    swiss_tourists,
+                    foreign_tourists,
+                    total_visitors,
+                    CASE 
+                        WHEN total_visitors > 0 THEN 
+                            (swiss_tourists::float / total_visitors::float) * 100 
+                        ELSE 0 
+                    END as swiss_percentage
             """
-            components["from_clause"] = "FROM data_lake.aoi_days_raw"
-            components["where_clause"] = where_clause
-            components["group_by_clause"] = "GROUP BY date"
-            components["order_by_clause"] = "ORDER BY date"
-            components["limit_clause"] = "LIMIT 100"
             
-        elif parsed_intent["intent"] == QueryIntent.PEAK_PERIOD:
-            # Generate query to find peak periods
+            # Add specific fields if this is a hotspot analysis
+            if parsed_intent["intent"] == QueryIntent.HOTSPOT_DETECTION:
+                components["select_clause"] += ",\n    ST_X(centroid) as central_longitude,\n    ST_Y(centroid) as central_latitude"
+            
+            components["from_clause"] = "FROM data_lake.regions"
+            components["where_clause"] = where_clause
+            
+        elif parsed_intent["intent"] == QueryIntent.VISITOR_COUNT:
+            # Generate query for visitor count analysis with enhanced metrics
             date_format = self._get_date_format_for_granularity(parsed_intent.get("granularity", TimeGranularity.DAY))
             
             components["select_clause"] = f"""
-                WITH visitor_stats AS (
+                WITH visitor_metrics AS (
                     SELECT 
-                        {date_format}::date as date,
+                        {date_format} as date,
                         SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
                         SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
+                        SUM((visitors->>'swissLocal')::numeric) as local_residents,
+                        SUM((visitors->>'foreignWorker')::numeric) as foreign_workers,
+                        SUM((visitors->>'swissCommuter')::numeric) as commuters,
                         SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) as total_visitors
                     FROM data_lake.aoi_days_raw
                     {where_clause}
@@ -299,8 +298,62 @@ class SQLGenerator:
                     date,
                     swiss_tourists,
                     foreign_tourists,
+                    local_residents,
+                    foreign_workers,
+                    commuters,
                     total_visitors,
-                    RANK() OVER (ORDER BY total_visitors DESC) as visitor_rank
+                    CASE 
+                        WHEN total_visitors > 0 THEN 
+                            (swiss_tourists::float / total_visitors::float) * 100 
+                        ELSE 0 
+                    END as swiss_percentage,
+                    CASE 
+                        WHEN total_visitors > 0 THEN 
+                            (foreign_tourists::float / total_visitors::float) * 100 
+                        ELSE 0 
+                    END as foreign_percentage
+                FROM visitor_metrics
+            """
+            components["from_clause"] = ""  # Already included in CTE
+            components["where_clause"] = ""  # Already included in CTE
+            components["group_by_clause"] = ""  # Already included in CTE
+            components["order_by_clause"] = "ORDER BY date"
+            components["limit_clause"] = "LIMIT 100"
+            
+        elif parsed_intent["intent"] == QueryIntent.PEAK_PERIOD:
+            # Generate query to find peak periods with enhanced analysis
+            date_format = self._get_date_format_for_granularity(parsed_intent.get("granularity", TimeGranularity.DAY))
+            
+            components["select_clause"] = f"""
+                WITH visitor_stats AS (
+                    SELECT 
+                        {date_format}::date as date,
+                        SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
+                        SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
+                        SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) as total_visitors,
+                        AVG((visitors->>'swissTourist')::numeric) as avg_swiss_tourists,
+                        AVG((visitors->>'foreignTourist')::numeric) as avg_foreign_tourists,
+                        STDDEV((visitors->>'swissTourist')::numeric) as stddev_swiss_tourists,
+                        STDDEV((visitors->>'foreignTourist')::numeric) as stddev_foreign_tourists
+                    FROM data_lake.aoi_days_raw
+                    {where_clause}
+                    GROUP BY date
+                )
+                SELECT 
+                    date,
+                    swiss_tourists,
+                    foreign_tourists,
+                    total_visitors,
+                    avg_swiss_tourists,
+                    avg_foreign_tourists,
+                    stddev_swiss_tourists,
+                    stddev_foreign_tourists,
+                    RANK() OVER (ORDER BY total_visitors DESC) as visitor_rank,
+                    CASE 
+                        WHEN total_visitors > (avg_swiss_tourists + avg_foreign_tourists + stddev_swiss_tourists + stddev_foreign_tourists) THEN 'Peak'
+                        WHEN total_visitors < (avg_swiss_tourists + avg_foreign_tourists - stddev_swiss_tourists - stddev_foreign_tourists) THEN 'Low'
+                        ELSE 'Normal'
+                    END as period_type
                 FROM visitor_stats
                 ORDER BY visitor_rank
                 LIMIT 10
@@ -311,19 +364,48 @@ class SQLGenerator:
             components["order_by_clause"] = ""  # Already included in CTE
             components["limit_clause"] = ""  # Already included in CTE
             
-        else:  # Default to visitor trend analysis
+        else:  # Default to visitor trend analysis with enhanced metrics
             date_format = self._get_date_format_for_granularity(parsed_intent.get("granularity", TimeGranularity.DAY))
             
             components["select_clause"] = f"""
+                WITH visitor_trends AS (
+                    SELECT 
+                        {date_format} as date,
+                        SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
+                        SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
+                        SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) as total_visitors,
+                        LAG(SUM((visitors->>'swissTourist')::numeric)) OVER (ORDER BY {date_format}) as prev_swiss_tourists,
+                        LAG(SUM((visitors->>'foreignTourist')::numeric)) OVER (ORDER BY {date_format}) as prev_foreign_tourists,
+                        LAG(SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric)) OVER (ORDER BY {date_format}) as prev_total_visitors
+                FROM data_lake.aoi_days_raw
+                    {where_clause}
+                    GROUP BY date
+                )
                 SELECT 
-                    {date_format} as date,
-                    SUM((visitors->>'swissTourist')::numeric) as swiss_tourists,
-                    SUM((visitors->>'foreignTourist')::numeric) as foreign_tourists,
-                    SUM((visitors->>'swissTourist')::numeric) + SUM((visitors->>'foreignTourist')::numeric) as total_visitors
+                    date,
+                    swiss_tourists,
+                    foreign_tourists,
+                    total_visitors,
+                    CASE 
+                        WHEN prev_swiss_tourists > 0 THEN 
+                            ((swiss_tourists - prev_swiss_tourists) / prev_swiss_tourists) * 100 
+                        ELSE NULL 
+                    END as swiss_growth_rate,
+                    CASE 
+                        WHEN prev_foreign_tourists > 0 THEN 
+                            ((foreign_tourists - prev_foreign_tourists) / prev_foreign_tourists) * 100 
+                        ELSE NULL 
+                    END as foreign_growth_rate,
+                    CASE 
+                        WHEN prev_total_visitors > 0 THEN 
+                            ((total_visitors - prev_total_visitors) / prev_total_visitors) * 100 
+                        ELSE NULL 
+                    END as total_growth_rate
+                FROM visitor_trends
             """
-            components["from_clause"] = "FROM data_lake.aoi_days_raw"
-            components["where_clause"] = where_clause
-            components["group_by_clause"] = "GROUP BY date"
+            components["from_clause"] = ""  # Already included in CTE
+            components["where_clause"] = ""  # Already included in CTE
+            components["group_by_clause"] = ""  # Already included in CTE
             components["order_by_clause"] = "ORDER BY date"
             components["limit_clause"] = "LIMIT 100"
         

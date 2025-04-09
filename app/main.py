@@ -31,11 +31,22 @@ app.add_middleware(
 
 # Initialize services
 db_service = DatabaseService()
-openai_adapter = OpenAIAdapter(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    api_base=os.getenv("OPENAI_API_BASE")
+try:
+    openai_adapter = OpenAIAdapter(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        api_base=os.getenv("OPENAI_API_BASE")
+    )
+    logger.info("OpenAI adapter initialized successfully")
+except Exception as e:
+    logger.error(f"Error initializing OpenAI adapter: {str(e)}")
+    openai_adapter = None  # Set to None so we can check if it's available
+
+# Initialize chat service with or without OpenAI adapter
+chat_service = ChatService(
+    db_service=db_service, 
+    schema_manager=schema_manager,
+    llm_adapter=openai_adapter  # Changed from openai_adapter to llm_adapter
 )
-chat_service = ChatService(db_service, openai_adapter, schema_manager)
 
 @app.on_event("startup")
 async def startup_event():
@@ -63,17 +74,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
         if not chat_service:
             raise HTTPException(status_code=503, detail="Chat service not initialized")
         
-        # Generate a consistent session ID based on the message content
-        # This helps with caching similar/identical queries
-        session_id = str(uuid.uuid4())
-        
         # Set a flag to indicate this is a direct API call (not validation)
         is_direct_query = True
             
         # Process the chat request
         response = await chat_service.process_chat(
-            message=request.message, 
-            session_id=session_id,
+            message=request.message,
             is_direct_query=is_direct_query
         )
         

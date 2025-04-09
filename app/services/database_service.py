@@ -35,7 +35,7 @@ class DatabaseService:
             if conn is not None:
                 conn.close()
     
-    def execute_query(self, query: str) -> List[Dict[str, Any]]:
+    def execute_query(self, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
         """
         Execute a SQL query and return results as a list of dictionaries
         """
@@ -65,7 +65,10 @@ class DatabaseService:
                         # Set slightly shorter timeout at DB level
                         cur.execute(f"SET statement_timeout = {(timeout_seconds - 1) * 1000}")
                     
-                    cur.execute(query)
+                    if params:
+                        cur.execute(query, params)
+                    else:
+                        cur.execute(query)
                     results = cur.fetchall()
                     conn.commit()  # Explicitly commit the transaction
                     # Cancel the alarm

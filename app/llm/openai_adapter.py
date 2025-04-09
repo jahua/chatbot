@@ -14,6 +14,7 @@ from sqlalchemy import create_engine, text
 from openai import AsyncOpenAI
 from app.db.schema_manager import schema_manager
 import json
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -42,8 +43,8 @@ class OpenAIAdapter:
         # Initialize LangChain chat model
         self.chat_model = ChatOpenAI(
             api_key=self.api_key,
-            model_name="gpt-3.5-turbo",
-            model_kwargs={"api_base": self.api_base}
+            model_name=settings.OPENAI_MODEL,
+            openai_api_base=self.api_base
         )
         
         # Initialize memory and prompts
@@ -289,6 +290,72 @@ Return a visualization configuration as JSON."""
             logger.error(f"Error generating visualization: {str(e)}")
             logger.error(traceback.format_exc())
             return None
+
+    async def agenerate_text(self, prompt: str, output_type: str = "text") -> str:
+        """Generate text using OpenAI API with error handling"""
+        try:
+            # Check if API key is available
+            if not self.api_key:
+                logger.error("OpenAI API key is missing")
+                return "Error: API key is missing"
+                
+            # Check if API base URL is properly configured
+            if not self.api_base:
+                logger.error("OpenAI API base URL is missing")
+                return "Error: API base URL is missing"
+                
+            # Log API configuration for debugging
+            logger.debug(f"Using OpenAI API base: {self.api_base}")
+            
+            # Generate response based on output type
+            if output_type == "json":
+                # For JSON output, use a more structured prompt
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant that provides accurate information in JSON format."},
+                    {"role": "user", "content": prompt}
+                ]
+                
+                response = await self.client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=messages,
+                    temperature=0.2,
+                    max_tokens=500
+                )
+                
+                return response.choices[0].message.content
+            else:
+                # For text output
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant that provides accurate information."},
+                    {"role": "user", "content": prompt}
+                ]
+                
+                response = await self.client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=1000
+                )
+                
+                return response.choices[0].message.content
+                
+        except Exception as e:
+            error_message = str(e)
+            logger.error(f"Error generating text: {error_message}")
+            logger.error(traceback.format_exc())
+            
+            # Check for authentication errors
+            if "401" in error_message or "unauthorized" in error_message.lower() or "无效的令牌" in error_message:
+                logger.error("Authentication error with OpenAI API. Please check your API key and base URL.")
+                return "Error: Authentication failed with the language model service."
+                
+            # Check for rate limiting
+            if "429" in error_message or "rate limit" in error_message.lower():
+                logger.error("Rate limit exceeded with OpenAI API.")
+                return "Error: Rate limit exceeded with the language model service."
+                
+            # Generic error
+            return f"Error: {error_message}"
 
     async def close(self):
         """Cleanup resources"""
