@@ -29,6 +29,15 @@ class DateTimeEncoder(json.JSONEncoder):
             return bool(obj)
         elif isinstance(obj, Decimal):
             return float(obj)
+        elif isinstance(obj, bytes):
+            try:
+                return base64.b64encode(obj).decode('utf-8')
+            except:
+                return str(obj)
+        elif hasattr(obj, 'tolist'):
+            return obj.tolist()
+        elif hasattr(obj, 'to_dict'):
+            return obj.to_dict()
         return super().default(obj)
 
 def figure_to_base64(fig) -> Optional[str]:

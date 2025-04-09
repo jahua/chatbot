@@ -30,6 +30,9 @@ from .database_service import DatabaseService
 from ..utils.intent_parser import IntentParser
 from ..models.chat_request import ChatRequest
 from functools import lru_cache
+from .geo_insights_service import GeoInsightsService
+from .geo_visualization_service import GeoVisualizationService
+from ..utils.hybrid_intent_parser import HybridIntentParser
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -43,6 +46,9 @@ class ChatService:
         self.schema_manager = schema_manager
         self._query_cache = {}  # Simple query cache
         self._cache_ttl = 300  # Cache TTL in seconds (5 minutes)
+        self.intent_parser = HybridIntentParser(llm_adapter=self.llm)
+        self.geo_insights_service = GeoInsightsService(db_service=self.db_service)
+        self.geo_visualization_service = GeoVisualizationService()
         logger.info("ChatService initialized successfully")
 
     def is_conversational_message(self, message: str) -> bool:
@@ -159,7 +165,7 @@ class ChatService:
             logger.error(traceback.format_exc())
             return "I can help you analyze tourism data including visitor statistics and transaction data. Please ask a specific question about tourism patterns."
     
-    async def process_chat(self, message: str, session_id: str, is_direct_query: bool = False) -> Dict[str, Any]:
+    async def process_chat(self, message: str, session_id: str = None, is_direct_query: bool = False) -> Dict[str, Any]:
         """Process a chat message and return a response with visualization"""
         try:
             # Check if it's a conversational message
@@ -184,6 +190,47 @@ class ChatService:
                     'sql_query': None,
                     'status': 'success'
                 }
+
+            # Parse the intent using the hybrid parser
+            parsed_data = await self.intent_parser.parse_intent(message)
+            intent = parsed_data.get('intent')
+            time_range = parsed_data.get('time_range')
+            granularity = parsed_data.get('granularity')
+            region_info = parsed_data.get('region_info', {})
+            comparison_type = parsed_data.get('comparison_type')
+            
+            logger.info(f"Parsed intent: {intent}, Time range: {time_range}, Granularity: {granularity}")
+            
+            # Enhanced geospatial detection
+            is_map_request = parsed_data.get('is_map_request', False)
+            contains_geo_terms = any(term in message.lower() for term in ['map', 'where', 'location', 'region', 'area', 'city', 'canton', 'country', 'geographic', 'spatial'])
+            contains_geo_viz_terms = any(term in message.lower() for term in ['show', 'display', 'map', 'plot', 'visualize', 'visualization'])
+            
+            logger.info(f"Geospatial detection - is_map_request: {is_map_request}, contains_geo_terms: {contains_geo_terms}, contains_geo_viz_terms: {contains_geo_viz_terms}")
+            
+            # Handle geospatial queries separately
+            if intent in [QueryIntent.GEO_SPATIAL, QueryIntent.REGION_ANALYSIS, 
+                          QueryIntent.HOTSPOT_DETECTION, QueryIntent.SPATIAL_PATTERN]:
+                logger.info("Routing to geospatial query handler")
+                return await self._handle_geospatial_query(message, intent, region_info)
+            # Add a more flexible router that can detect map requests even if the intent parser missed it
+            elif contains_geo_terms and contains_geo_viz_terms:
+                logger.info("Detected map request from keywords, routing to geospatial query handler")
+                
+                # Create basic region info from message if not available
+                if not region_info:
+                    # Extract region name - simple approach
+                    region_match = re.search(r"(?:in|of|for|at)\s+(?:the\s+)?(\w+(?:\s+\w+){0,3})", message.lower())
+                    region_name = region_match.group(1) if region_match else "not specified in the query"
+                    
+                    region_info = {
+                        'region_name': region_name,
+                        'region_type': 'unknown',
+                        'is_map_request': True,
+                        'fallback_intent': QueryIntent.TREND_ANALYSIS
+                    }
+                
+                return await self._handle_geospatial_query(message, QueryIntent.GEO_SPATIAL, region_info)
 
             # Generate SQL query based on user message
             try:
@@ -592,3 +639,487 @@ class ChatService:
             # Simple strategy: remove oldest entries
             oldest_key = min(self._query_cache.keys(), key=lambda k: self._query_cache[k]['timestamp'])
             del self._query_cache[oldest_key] 
+
+    def _is_visitor_comparison_request(self, message: str) -> bool:
+        """
+        Determine if a message is asking for visitor comparison between regions
+        """
+        comparison_keywords = [
+            "compare", "comparison", "comparing", "difference", "differences", 
+            "versus", "vs", "against", "between", "distribution", "choropleth", 
+            "heat map", "heatmap", "color coding", "color-coded", "ratio",
+            "visualization", "visualize", "visualisation", "visualise", "map"
+        ]
+        
+        tourist_keywords = [
+            "tourist", "tourists", "visitor", "visitors", "traveler", "travelers",
+            "traveller", "travellers", "guest", "guests", "swiss", "foreign", 
+            "domestic", "international"
+        ]
+        
+        # Check if message contains both comparison and tourist keywords
+        has_comparison = any(keyword in message.lower() for keyword in comparison_keywords)
+        has_tourist = any(keyword in message.lower() for keyword in tourist_keywords)
+        
+        return has_comparison and has_tourist
+
+    async def _handle_geospatial_query(self, message: str, intent: QueryIntent, region_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle geospatial queries specifically"""
+        try:
+            # Extract region name and type from region_info
+            region_name = region_info.get('region_name', '')
+            region_type = region_info.get('region_type', 'unknown') # Default to unknown
+            
+            # Check if this is a visitor comparison request
+            if self._is_visitor_comparison_request(message):
+                intent = QueryIntent.VISITOR_COMPARISON
+                logger.info(f"Detected visitor comparison request, overriding intent to {intent}")
+            
+            if not region_name:
+                logger.error("Region name missing from intent parsing for geospatial query.")
+                return { # Return error if region name is missing
+                    'message_id': str(uuid.uuid4()),
+                    'content': "Could not identify a region name in your query.",
+                    'response': "Could not identify a region name in your query.",
+                    'visualization': None,
+                    'sql_query': None,
+                    'status': 'error'
+                }
+            
+            logger.info(f"Processing geospatial query for {region_name} ({region_type})")
+            
+            # Check if this is explicitly a map request
+            is_map_request = region_info.get('is_map_request', False)
+            fallback_intent = region_info.get('fallback_intent', QueryIntent.TREND_ANALYSIS)
+            
+            # Search for regions using the optimized service method
+            regions = self.geo_insights_service.search_regions(region_name, region_type)
+            
+            if not regions:
+                logger.warning(f"No geographic data found for {region_name}. Checking if we should use temporal fallback.")
+                
+                # If this is not explicitly a map request, or we have a fallback intent,
+                # generate a temporal analysis query instead
+                if not is_map_request or fallback_intent:
+                    logger.info(f"Using fallback intent: {fallback_intent}")
+                    
+                    # Generate a time-based query for the region
+                    fallback_query = f"Show me tourism trends in {region_name} over time"
+                    
+                    # Build a SQL query for temporal analysis
+                    query_result = self.sql_generator.generate_sql_query(fallback_query)
+                    if not query_result or 'error' in query_result:
+                        return {
+                            'message_id': str(uuid.uuid4()),
+                            'content': f"I couldn't find any data for {region_name}. Please try a different region name.",
+                            'response': f"I couldn't find any data for {region_name}. Please try a different region name.",
+                            'visualization': None,
+                            'sql_query': None,
+                            'status': 'error'
+                        }
+                    
+                    sql_query = query_result.get('query', '')
+                    
+                    # Execute the SQL query
+                    try:
+                        results = self.db_service.execute_query(sql_query)
+                        if not results:
+                            return {
+                                'message_id': str(uuid.uuid4()),
+                                'content': f"I couldn't find any data for {region_name}. Please try a different region name.",
+                                'response': f"I couldn't find any data for {region_name}. Please try a different region name.",
+                                'visualization': None,
+                                'sql_query': sql_query,
+                                'status': 'error'
+                            }
+                        
+                        # Generate visualization for the temporal data
+                        visualization = generate_visualization(results, fallback_intent)
+                        visualization_json = json.dumps(visualization, cls=DateTimeEncoder) if visualization else None
+                        
+                        # Generate analysis from temporal data
+                        analysis = generate_analysis_summary(results, fallback_intent)
+                        
+                        return {
+                            'message_id': str(uuid.uuid4()),
+                            'content': analysis,
+                            'response': analysis,
+                            'visualization': visualization_json,
+                            'sql_query': sql_query,
+                            'status': 'success'
+                        }
+                    except Exception as exec_error:
+                        logger.error(f"Error executing fallback query: {str(exec_error)}")
+                        # Continue to standard error response
+                
+                # If fallback failed or wasn't appropriate, return the standard error
+                return {
+                    'message_id': str(uuid.uuid4()),
+                    'content': f"I couldn't find any data for {region_name}. Please try a different region name.",
+                    'response': f"I couldn't find any data for {region_name}. Please try a different region name.",
+                    'visualization': None,
+                    'sql_query': None,
+                    'status': 'error'
+                }
+            
+            # Prepare data for visualization - Create complete region data structure
+            for i, region in enumerate(regions):
+                # Set a unique region_id based on type and name
+                # Format: State_ticino or Msa_lugano
+                region_id = f"{region['geo_type']}_{region['geo_name'].lower().replace(' ', '_')}"
+                region['region_id'] = region_id
+                region['region_name'] = region['geo_name']
+                region['region_type'] = region['geo_type']
+                
+                # Add default center coordinates if missing
+                if 'central_latitude' not in region or not region['central_latitude']:
+                    region['central_latitude'] = 46.8182  # Default to Switzerland
+                if 'central_longitude' not in region or not region['central_longitude']:
+                    region['central_longitude'] = 8.2275  # Default to Switzerland
+                
+                # Ensure numeric values are properly formatted
+                region['total_visitors'] = float(region.get('total_visitors', 0) or 0)
+                region['swiss_tourists'] = float(region.get('swiss_tourists', 0) or 0)
+                region['foreign_tourists'] = float(region.get('foreign_tourists', 0) or 0)
+            
+            # Get insights for the region
+            insights = self.geo_insights_service.get_region_insights(regions[0]['region_id'])
+            
+            # Generate visualization based on intent
+            visualization = None
+            if intent == QueryIntent.REGION_ANALYSIS:
+                visualization = self.geo_visualization_service.create_region_map(regions)
+            elif intent == QueryIntent.HOTSPOT_DETECTION:
+                hotspots = self.geo_insights_service.get_hotspots(regions[0]['region_id'])
+                visualization = self.geo_visualization_service.create_hotspot_map(hotspots)
+            elif intent == QueryIntent.INDUSTRY_ANALYSIS:
+                # For industry analysis, we need spatial patterns data but render it differently
+                patterns = self.geo_insights_service.get_spatial_patterns(regions[0]['region_id'])
+                visualization = self.geo_visualization_service.create_industry_bounding_box_map(patterns, regions[0]['region_id'])
+            elif intent == QueryIntent.SPATIAL_PATTERN:
+                patterns = self.geo_insights_service.get_spatial_patterns(regions[0]['region_id'])
+                
+                # Check if this is an industry analysis request
+                industry_keywords = ['industry', 'industries', 'sector', 'sectors', 'business', 'businesses', 
+                                   'category', 'categories', 'aggregate', 'merged', 'bounding box', 'boundingbox', 
+                                   'bound', 'boundary', 'area', 'zone', 'merge', 'color map', 'color', 'color coding']
+                is_industry_request = any(keyword in message.lower() for keyword in industry_keywords)
+                
+                if is_industry_request:
+                    # Use the industry bounding box visualization instead
+                    visualization = self.geo_visualization_service.create_industry_bounding_box_map(patterns, regions[0]['region_id'])
+                else:
+                    visualization = self.geo_visualization_service.create_spatial_pattern_chart(patterns, regions[0]['region_id'])
+            elif intent == QueryIntent.VISITOR_COMPARISON:
+                # Determine which metric to use based on message content
+                metric = "total_visitors"  # Default
+                
+                # Check for explicit mentions of Swiss or foreign tourists
+                if any(word in message.lower() for word in ["swiss", "domestic", "local"]):
+                    metric = "swiss"
+                elif any(word in message.lower() for word in ["foreign", "international", "overseas"]):
+                    metric = "foreign"
+                elif any(word in message.lower() for word in ["ratio", "proportion", "comparison", "versus", "vs"]):
+                    metric = "ratio"
+                    
+                # Use the specialized visitor comparison map
+                visualization = self.geo_visualization_service.create_visitor_comparison_map(regions, metric)
+            else:  # Default to GEO_SPATIAL
+                visualization = self.geo_visualization_service.create_region_map(regions)
+            
+            # If visualization is None, create a default map
+            if visualization is None:
+                visualization = {
+                    'type': 'region_map',
+                    'data': {
+                        'center': [8.2275, 46.8182],  # Switzerland center
+                        'zoom': 7,
+                        'regions': [{
+                            'name': region['region_name'],
+                            'type': region['region_type'],
+                            'total_visitors': float(region.get('total_visitors', 0) or 0)
+                        } for region in regions]
+                    }
+                }
+            
+            # Convert visualization to JSON
+            try:
+                visualization_json = json.dumps(visualization, cls=DateTimeEncoder) if visualization else None
+            except Exception as viz_error:
+                logger.error(f"Error converting visualization to JSON: {str(viz_error)}")
+                visualization_json = None
+            
+            # Generate analysis text
+            analysis = self._generate_geospatial_analysis(insights, intent)
+            
+            return {
+                'message_id': str(uuid.uuid4()),
+                'content': analysis,
+                'response': analysis,
+                'visualization': visualization_json,
+                'sql_query': None,
+                'status': 'success'
+            }
+        
+        except Exception as e:
+            logger.error(f"Error processing geospatial query: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {
+                'message_id': str(uuid.uuid4()),
+                'content': "Sorry, I encountered an error while processing your geospatial request.",
+                'response': "Sorry, I encountered an error while processing your geospatial request.",
+                'visualization': None,
+                'sql_query': None,
+                'status': 'error'
+            }
+    
+    def _generate_geospatial_analysis(self, insights: Dict[str, Any], intent: QueryIntent) -> str:
+        """Generate natural language analysis for geospatial data"""
+        try:
+            if not insights:
+                return "No geospatial data available for analysis."
+            
+            if intent == QueryIntent.HOTSPOT_DETECTION:
+                # Find highest visitor count area
+                return (
+                    f"The tourism hotspot in {insights.get('region_name', 'this region')} has "
+                    f"{insights.get('peak_visitors', 0):,} visitors at its peak. "
+                    f"Swiss tourists account for {insights.get('swiss_tourists', 0):,} visitors, while "
+                    f"foreign tourists account for {insights.get('foreign_tourists', 0):,} visitors."
+                )
+            elif intent == QueryIntent.INDUSTRY_ANALYSIS:
+                # Analyze industry distribution
+                return (
+                    f"Tourism in {insights.get('region_name', 'this region')} shows a distribution across multiple industries "
+                    f"with a total of {insights.get('total_visitors', 0):,} visitors. "
+                    f"Each colored area represents a different industry sector, with point size indicating activity level. "
+                    f"The map displays industry-specific boundaries to help visualize where different business types are concentrated."
+                )
+            elif intent == QueryIntent.SPATIAL_PATTERN:
+                # Analyze spatial distribution pattern
+                return (
+                    f"Tourism in {insights.get('region_name', 'this region')} shows a spatial pattern with "
+                    f"{insights.get('total_visitors', 0):,} total visitors. "
+                    f"The average daily Swiss tourist count is {insights.get('avg_swiss_tourists', 0):.0f}, "
+                    f"while the average foreign tourist count is {insights.get('avg_foreign_tourists', 0):.0f}."
+                )
+            else:  # Default to region analysis
+                # Basic region summary
+                swiss_percent = 0
+                if float(insights.get('total_visitors', 0)) > 0:
+                    swiss_percent = (float(insights.get('swiss_tourists', 0)) / float(insights.get('total_visitors', 1))) * 100
+                
+                return (
+                    f"{insights.get('region_name', 'This region')} received {insights.get('total_visitors', 0):,} visitors. "
+                    f"Approximately {swiss_percent:.1f}% were domestic tourists, "
+                    f"with the remainder being international visitors."
+                )
+            
+        except Exception as e:
+            logger.error(f"Error generating geospatial analysis: {str(e)}")
+            return "Error generating geospatial analysis."
+
+    async def _handle_intent(self, message: str, intent_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle all intents by routing to appropriate handler"""
+        intent = intent_result.get('intent', QueryIntent.TREND_ANALYSIS)
+        metadata = intent_result.get('metadata', {})
+        region_info = intent_result.get('region_info', {})
+        
+        # Override intent if this is a visitor comparison request
+        if self._is_visitor_comparison_request(message) and region_info:
+            intent = QueryIntent.VISITOR_COMPARISON
+            intent_result['intent'] = QueryIntent.VISITOR_COMPARISON
+            logger.info(f"Detected visitor comparison request, overriding intent to {intent}")
+
+        # Handle geospatial queries separately
+        if intent in [QueryIntent.GEO_SPATIAL, QueryIntent.REGION_ANALYSIS, 
+                      QueryIntent.HOTSPOT_DETECTION, QueryIntent.SPATIAL_PATTERN]:
+            logger.info("Routing to geospatial query handler")
+            return await self._handle_geospatial_query(message, intent, region_info)
+        # Add a more flexible router that can detect map requests even if the intent parser missed it
+        elif contains_geo_terms and contains_geo_viz_terms:
+            logger.info("Detected map request from keywords, routing to geospatial query handler")
+            
+            # Create basic region info from message if not available
+            if not region_info:
+                # Extract region name - simple approach
+                region_match = re.search(r"(?:in|of|for|at)\s+(?:the\s+)?(\w+(?:\s+\w+){0,3})", message.lower())
+                region_name = region_match.group(1) if region_match else "not specified in the query"
+                
+                region_info = {
+                    'region_name': region_name,
+                    'region_type': 'unknown',
+                    'is_map_request': True,
+                    'fallback_intent': QueryIntent.TREND_ANALYSIS
+                }
+            
+            return await self._handle_geospatial_query(message, QueryIntent.GEO_SPATIAL, region_info)
+
+        # Generate SQL query based on user message
+        try:
+            # Add original message to help with specific query optimizations
+            query_result = self.sql_generator.generate_sql_query(message)
+            
+            # If this is a parsing object, add the original message for context
+            if isinstance(query_result, dict) and not 'error' in query_result:
+                query_result['original_message'] = message
+                
+            logger.debug(f"Generated SQL query: {query_result}")
+            
+            if not query_result or 'error' in query_result:
+                error_msg = query_result.get('error', 'Unknown error in query generation') if query_result else 'Failed to generate query'
+                logger.error(f"SQL generation failed for message: {message}, error: {error_msg}")
+                return {
+                    'message_id': str(uuid.uuid4()),
+                    'content': "I couldn't understand your query. Could you please rephrase it?",
+                    'response': "I couldn't understand your query. Could you please rephrase it?",
+                    'visualization': None,
+                    'sql_query': None,
+                    'status': 'error'
+                }
+            
+            sql_query = query_result.get('query', '')
+            intent_str = query_result.get('intent', 'visitor_count')
+            
+            # Convert string intent to enum
+            intent = None
+            for intent_enum in QueryIntent:
+                if intent_enum.value == intent_str:
+                    intent = intent_enum
+                    break
+            
+            metadata = query_result.get('metadata', {})
+            
+            # Validate query - skip validation for direct API calls 
+            # to prevent the double-query issue
+            if not is_direct_query:
+                try:
+                    # Check if validate_query is available
+                    # Skip validation for simple queries to reduce database load
+                    is_simple_query = len(sql_query.strip()) < 500 and "UNION" not in sql_query.upper() and "WITH" not in sql_query.upper()
+                    
+                    if hasattr(self.db_service, 'validate_query') and not is_simple_query:
+                        is_valid = self.db_service.validate_query(sql_query)
+                        if not is_valid:
+                            logger.error(f"Invalid SQL query: {sql_query}")
+                            return {
+                                'message_id': str(uuid.uuid4()),
+                                'content': "I couldn't generate a valid query for your question. Could you please rephrase it?",
+                                'response': "I couldn't generate a valid query for your question. Could you please rephrase it?",
+                                'visualization': None,
+                                'sql_query': sql_query,
+                                'status': 'error'
+                            }
+                    else:
+                        # Skip validation if method not available or query is simple
+                        logger.info(f"Skipping validation for query: {'simple query' if is_simple_query else 'validation not available'}")
+                except Exception as e:
+                    logger.error(f"Error during query validation: {str(e)}")
+                    logger.error(traceback.format_exc())
+            else:
+                logger.info(f"Skipping validation for direct API call")
+            
+            # Execute query and get data
+            try:
+                # Check cache first
+                cached_data = self._get_cached_query_result(sql_query)
+                if cached_data is not None:
+                    data = cached_data
+                else:
+                    data = self.db_service.execute_query(sql_query)
+                    # Cache the result for future use
+                    self._cache_query_result(sql_query, data)
+            except TimeoutError as e:
+                return {
+                    'message_id': str(uuid.uuid4()),
+                    'content': str(e),
+                    'response': str(e),
+                    'visualization': None,
+                    'sql_query': sql_query,
+                    'status': 'error'
+                }
+            
+            if not data:
+                # Check if this is a future date query
+                time_range = metadata.get('time_range', {})
+                start_date = time_range.get('start_date', '')
+                
+                if start_date and datetime.strptime(start_date, '%Y-%m-%d') > datetime.now():
+                    return {
+                        'message_id': str(uuid.uuid4()),
+                        'content': f"I don't have data for future dates like {start_date}. Would you like to see data from a past period instead?",
+                        'response': f"I don't have data for future dates like {start_date}. Would you like to see data from a past period instead?",
+                        'visualization': None,
+                        'sql_query': sql_query,
+                        'status': 'error'
+                    }
+                
+                return {
+                    'message_id': str(uuid.uuid4()),
+                    'content': "I couldn't find any data matching your query.",
+                    'response': "I couldn't find any data matching your query.",
+                    'visualization': None,
+                    'sql_query': sql_query,
+                    'status': 'error'
+                }
+            
+            # Generate visualization based on intent and data
+            try:
+                visualization_data = generate_visualization(data, intent)
+                visualization_json = json.dumps(visualization_data, cls=DateTimeEncoder) if visualization_data else None
+            except Exception as viz_error:
+                logger.error(f"Error generating visualization: {str(viz_error)}")
+                logger.error(traceback.format_exc())
+                visualization_json = None
+            
+            # Generate analysis summary
+            analysis = self._generate_analysis(data, intent, metadata)
+            
+            return {
+                'message_id': str(uuid.uuid4()),
+                'content': analysis,
+                'response': analysis,
+                'visualization': visualization_json,
+                'sql_query': sql_query,
+                'status': 'success'
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing SQL generation: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {
+                'message_id': str(uuid.uuid4()),
+                'content': "Sorry, I encountered an error while processing your request.",
+                'response': "Sorry, I encountered an error while processing your request.",
+                'visualization': None,
+                'sql_query': None,
+                'status': 'error'
+            }
+
+    async def _generate_visualization(self, data: List[Dict[str, Any]], intent_result: Dict[str, Any]) -> Optional[str]:
+        """
+        Generate a visualization based on the data and intent
+        """
+        try:
+            if not data:
+                return None
+                
+            intent = intent_result.get('intent')
+            metadata = intent_result.get('metadata', {})
+            
+            # Generate visualization based on intent
+            if intent == QueryIntent.VISITOR_COMPARISON:
+                return await self._visualize_visitor_comparison(data)
+            elif intent == QueryIntent.PEAK_PERIOD:
+                return await self._visualize_peak_period(data)
+            elif intent == QueryIntent.SPENDING:
+                return await self._visualize_spending(data)
+            elif intent == QueryIntent.TREND:
+                return await self._visualize_trend(data)
+            else:
+                return await self._visualize_default(data)
+                
+        except Exception as e:
+            logger.error(f"Error generating visualization: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None 

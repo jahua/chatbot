@@ -1,0 +1,38 @@
+[
+  {
+    "id": "ticino_1",
+    "name": "Bellinzona e Alto Ticino",
+    "description": "A region known for its medieval castles and alpine landscapes. The area offers hiking trails, cultural events, and historical sites.",
+    "visitors": 150000,
+    "attractions": ["Castelgrande", "Montebello Castle", "Sasso Corbaro", "Alpine Hiking Trails"],
+    "location": "Bellinzona, Ticino, Switzerland",
+    "geometry": {
+      "type": "Polygon",
+      "coordinates": [[[9.0, 46.2], [9.1, 46.2], [9.1, 46.3], [9.0, 46.3], [9.0, 46.2]]]
+    }
+  },
+  {
+    "id": "ticino_2",
+    "name": "Lugano e Dintorni",
+    "description": "A vibrant city on the shores of Lake Lugano, offering a mix of urban culture and natural beauty. Known for its Mediterranean climate and palm-lined promenades.",
+    "visitors": 250000,
+    "attractions": ["Lake Lugano", "Parco Ciani", "Santa Maria degli Angioli", "Monte San Salvatore"],
+    "location": "Lugano, Ticino, Switzerland",
+    "geometry": {
+      "type": "Polygon",
+      "coordinates": [[[8.9, 46.0], [9.0, 46.0], [9.0, 46.1], [8.9, 46.1], [8.9, 46.0]]]
+    }
+  },
+  {
+    "id": "ticino_3",
+    "name": "Locarno e Lago Maggiore",
+    "description": "A picturesque region on the shores of Lake Maggiore, known for its mild climate, beautiful gardens, and the annual Locarno Film Festival.",
+    "visitors": 200000,
+    "attractions": ["Lake Maggiore", "Piazza Grande", "Madonna del Sasso", "Brissago Islands"],
+    "location": "Locarno, Ticino, Switzerland",
+    "geometry": {
+      "type": "Polygon",
+      "coordinates": [[[8.7, 46.1], [8.8, 46.1], [8.8, 46.2], [8.7, 46.2], [8.7, 46.1]]]
+    }
+  }
+] 

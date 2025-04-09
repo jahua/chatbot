@@ -1,0 +1,81 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Lugano",
+        "id": "LUG"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [8.9250, 45.9800],
+            [8.9800, 46.0300],
+            [8.9600, 46.0400],
+            [8.9100, 46.0200],
+            [8.9250, 45.9800]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bellinzona",
+        "id": "BEL"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [9.0000, 46.2200],
+            [9.0500, 46.2100],
+            [9.0300, 46.1800],
+            [8.9800, 46.1900],
+            [9.0000, 46.2200]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Locarno",
+        "id": "LOC"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [8.7800, 46.1800],
+            [8.8200, 46.1700],
+            [8.8000, 46.1400],
+            [8.7600, 46.1500],
+            [8.7800, 46.1800]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Mendrisio",
+        "id": "MEN"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [8.9600, 45.8800],
+            [9.0000, 45.8700],
+            [8.9800, 45.8400],
+            [8.9400, 45.8500],
+            [8.9600, 45.8800]
+          ]
+        ]
+      }
+    }
+  ]
+} 
