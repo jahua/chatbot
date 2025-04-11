@@ -1,0 +1,22 @@
+
+INSTRUCTIONS FOR DOWNLOADING OFFICIAL TICINO BOUNDARIES:
+
+For the most accurate and official boundaries, follow these steps:
+
+1. Visit the Swiss Federal Geoportal: https://map.geo.admin.ch/
+
+2. Search for "Ticino" in the search bar
+
+3. In the left sidebar, click on "Catalog" and search for "administrative boundaries"
+
+4. Select the layer "Administrative boundaries of Switzerland" or "Swiss boundaries"
+
+5. Use the "Draw & Measure" tool to draw a rectangle around Ticino
+
+6. Click on "Advanced tools" and select "Export"
+
+7. Choose GeoJSON format and download the file
+
+8. Use this downloaded file in your Streamlit application for accurate boundaries
+
+This will give you official and detailed boundaries from the Swiss Federal Office of Topography.

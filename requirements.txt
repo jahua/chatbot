@@ -14,7 +14,7 @@ langchain-core==0.3.49
 langsmith==0.3.22
 langchain-text-splitters==0.3.7
 python-multipart==0.0.9
-streamlit==1.31.1
+streamlit==1.32.0
 numpy==1.26.4
 aiohttp==3.9.3
 chromadb==0.4.22
@@ -23,4 +23,6 @@ python-jose==3.3.0
 passlib==1.7.4
 bcrypt==4.1.2
 httpx==0.28.1
-vanna==0.0.26 
+vanna==0.0.26
+geopandas==0.14.2
+shapely==2.0.2 

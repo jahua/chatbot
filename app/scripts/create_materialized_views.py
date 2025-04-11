@@ -49,14 +49,6 @@ TCP_KEEPALIVES = True       # Enable TCP keepalives
 CREATE_SCHEMA_SQL = "CREATE SCHEMA IF NOT EXISTS geo_insights;"
 ENABLE_POSTGIS_SQL = "CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public;"
 
-DROP_VIEWS_SQL = """
-DROP MATERIALIZED VIEW IF EXISTS geo_insights.temporal_insights;
-DROP MATERIALIZED VIEW IF EXISTS geo_insights.spatial_patterns;
-DROP MATERIALIZED VIEW IF EXISTS geo_insights.industry_insights;
-DROP MATERIALIZED VIEW IF EXISTS geo_insights.region_hotspots;
-DROP MATERIALIZED VIEW IF EXISTS geo_insights.region_summary;
-"""
-
 # Fixed check for bounding box validity
 CHECK_BOUNDING_BOX_SQL = """
 SELECT 
@@ -264,12 +256,208 @@ END;
 $$ LANGUAGE plpgsql;
 """
 
-# SQL_EXECUTION_ORDER reordered for reliability
+# Combined spatial and economic insights view
+CREATE_COMBINED_INSIGHTS_SQL = """
+CREATE MATERIALIZED VIEW geo_insights.combined_spatial_analysis AS
+WITH base_data AS (
+    SELECT
+        geo_type,
+        geo_name,
+        bounding_box,
+        industry,
+        segment,
+        txn_date,
+        txn_cnt,
+        txn_amt,
+        central_latitude,
+        central_longitude
+    FROM data_lake.master_card
+    WHERE 
+        bounding_box IS NOT NULL
+        AND central_latitude IS NOT NULL
+        AND central_longitude IS NOT NULL
+),
+spatial_metrics AS (
+    SELECT
+        geo_type,
+        geo_name,
+        bounding_box,
+        COUNT(*) as total_points,
+        SUM(txn_cnt) as total_transactions,
+        SUM(txn_amt) as total_spend,
+        COUNT(DISTINCT industry) as industry_count,
+        ST_Area(bounding_box::geometry) as area_sq_km,
+        SUM(txn_cnt) / NULLIF(ST_Area(bounding_box::geometry), 0) as transaction_density
+    FROM base_data
+    GROUP BY geo_type, geo_name, bounding_box
+),
+tourist_metrics AS (
+    SELECT
+        geo_type,
+        geo_name,
+        EXTRACT(MONTH FROM txn_date) as month,
+        SUM(CASE WHEN segment = 'Domestic' THEN txn_cnt ELSE 0 END) as swiss_tourists,
+        SUM(CASE WHEN segment = 'International' THEN txn_cnt ELSE 0 END) as foreign_tourists,
+        SUM(txn_cnt) as total_visitors
+    FROM base_data
+    GROUP BY geo_type, geo_name, EXTRACT(MONTH FROM txn_date)
+),
+industry_metrics AS (
+    SELECT
+        geo_type,
+        geo_name,
+        industry,
+        SUM(txn_cnt) as industry_transactions,
+        SUM(txn_amt) as industry_spend,
+        COUNT(*) as industry_points,
+        ROW_NUMBER() OVER (PARTITION BY geo_type, geo_name ORDER BY SUM(txn_cnt) DESC) as industry_rank
+    FROM base_data
+    GROUP BY geo_type, geo_name, industry
+),
+industry_clusters AS (
+    SELECT
+        geo_type,
+        geo_name,
+        array_agg(industry ORDER BY industry_transactions DESC) as top_industries,
+        array_agg(industry_transactions ORDER BY industry_transactions DESC) as industry_volumes
+    FROM industry_metrics
+    WHERE industry_rank <= 5
+    GROUP BY geo_type, geo_name
+)
+SELECT
+    sm.geo_type,
+    sm.geo_name,
+    sm.bounding_box,
+    sm.total_points,
+    sm.total_transactions,
+    sm.total_spend,
+    sm.industry_count,
+    sm.area_sq_km,
+    sm.transaction_density,
+    tm.month,
+    tm.swiss_tourists,
+    tm.foreign_tourists,
+    tm.total_visitors,
+    ic.top_industries,
+    ic.industry_volumes,
+    ST_Centroid(sm.bounding_box::geometry) as centroid,
+    ST_Envelope(sm.bounding_box::geometry) as envelope
+FROM spatial_metrics sm
+LEFT JOIN tourist_metrics tm ON sm.geo_type = tm.geo_type AND sm.geo_name = tm.geo_name
+LEFT JOIN industry_clusters ic ON sm.geo_type = ic.geo_type AND sm.geo_name = ic.geo_name
+WITH DATA;
+"""
+
+INDEX_COMBINED_INSIGHTS_SQL = """
+CREATE INDEX IF NOT EXISTS idx_combined_insights_geo ON geo_insights.combined_spatial_analysis(geo_type, geo_name);
+CREATE INDEX IF NOT EXISTS idx_combined_insights_bbox ON geo_insights.combined_spatial_analysis USING GIST(bounding_box::geometry);
+CREATE INDEX IF NOT EXISTS idx_combined_insights_centroid ON geo_insights.combined_spatial_analysis USING GIST(centroid);
+"""
+
+# Create a materialized view specifically for choropleth mapping
+CREATE_CHOROPLETH_ANALYTICS_SQL = """
+CREATE MATERIALIZED VIEW geo_insights.choropleth_analytics AS
+WITH region_boundaries AS (
+    -- Get base region information from shapefile data
+    SELECT DISTINCT
+        BZNAME as region_name,
+        AREA_HA as area_ha,
+        ST_X(ST_Centroid(geometry::geometry)) as longitude,
+        ST_Y(ST_Centroid(geometry::geometry)) as latitude
+    FROM 
+        data_lake.master_card
+    WHERE 
+        BZNAME IS NOT NULL
+),
+tourism_metrics AS (
+    -- Calculate tourism metrics
+    SELECT 
+        geo_name as region_name,
+        SUM(CASE WHEN segment = 'Domestic' THEN txn_cnt ELSE 0 END)::FLOAT as swiss_tourists,
+        SUM(CASE WHEN segment = 'International' THEN txn_cnt ELSE 0 END)::FLOAT as foreign_tourists,
+        SUM(txn_cnt)::FLOAT as total_visitors,
+        CASE 
+            WHEN SUM(txn_cnt) > 0 
+            THEN (SUM(CASE WHEN segment = 'International' THEN txn_cnt ELSE 0 END)::FLOAT / SUM(txn_cnt)::FLOAT * 100)
+            ELSE 0 
+        END as foreign_tourist_percentage
+    FROM 
+        data_lake.master_card
+    GROUP BY 
+        geo_name
+),
+spending_metrics AS (
+    -- Calculate spending metrics
+    SELECT 
+        geo_name as region_name,
+        SUM(txn_amt)::FLOAT as total_spend,
+        AVG(txn_amt)::FLOAT as avg_transaction_value,
+        SUM(txn_amt)::FLOAT / NULLIF(COUNT(DISTINCT txn_date), 0) as daily_spend
+    FROM 
+        data_lake.master_card
+    GROUP BY 
+        geo_name
+),
+industry_metrics AS (
+    -- Calculate industry metrics
+    SELECT 
+        geo_name as region_name,
+        COUNT(DISTINCT industry) as industry_count,
+        array_agg(DISTINCT industry) as industries,
+        array_agg(industry ORDER BY COUNT(*) DESC) FILTER (WHERE industry IS NOT NULL) as top_industries
+    FROM 
+        data_lake.master_card
+    WHERE 
+        industry IS NOT NULL
+    GROUP BY 
+        geo_name
+)
+SELECT 
+    rb.region_name,
+    rb.area_ha,
+    rb.longitude,
+    rb.latitude,
+    tm.swiss_tourists,
+    tm.foreign_tourists,
+    tm.total_visitors,
+    tm.foreign_tourist_percentage,
+    sm.total_spend,
+    sm.avg_transaction_value,
+    sm.daily_spend,
+    CASE 
+        WHEN rb.area_ha > 0 THEN sm.total_spend / rb.area_ha 
+        ELSE NULL 
+    END as spend_per_hectare,
+    CASE 
+        WHEN tm.total_visitors > 0 THEN sm.total_spend / tm.total_visitors 
+        ELSE NULL 
+    END as spend_per_visitor,
+    im.industry_count,
+    im.industries,
+    im.top_industries[1] as top_industry
+FROM 
+    region_boundaries rb
+LEFT JOIN 
+    tourism_metrics tm ON rb.region_name = tm.region_name
+LEFT JOIN 
+    spending_metrics sm ON rb.region_name = sm.region_name
+LEFT JOIN 
+    industry_metrics im ON rb.region_name = im.region_name;
+"""
+
+# Add index creation for the new view
+CREATE_CHOROPLETH_ANALYTICS_INDICES = """
+CREATE INDEX IF NOT EXISTS idx_choropleth_region_name ON geo_insights.choropleth_analytics(region_name);
+CREATE INDEX IF NOT EXISTS idx_choropleth_top_industry ON geo_insights.choropleth_analytics(top_industry);
+"""
+
+# Modified SQL_EXECUTION_ORDER to remove the drop views step
 SQL_EXECUTION_ORDER = [
     ("Enable PostGIS", ENABLE_POSTGIS_SQL),
     ("Create Schema", CREATE_SCHEMA_SQL),
-    ("Drop Existing Views", DROP_VIEWS_SQL),
-    ("Create Temporal Insights", CREATE_TEMPORAL_INSIGHTS_SQL),  # Start with simplest views
+    ("Create Combined Insights", CREATE_COMBINED_INSIGHTS_SQL),
+    ("Index Combined Insights", INDEX_COMBINED_INSIGHTS_SQL),
+    ("Create Temporal Insights", CREATE_TEMPORAL_INSIGHTS_SQL),
     ("Index Temporal Insights", INDEX_TEMPORAL_INSIGHTS_SQL),
     ("Create Industry Insights", CREATE_INDUSTRY_INSIGHTS_SQL),
     ("Index Industry Insights", INDEX_INDUSTRY_INSIGHTS_SQL),
@@ -280,6 +468,8 @@ SQL_EXECUTION_ORDER = [
     ("Create Spatial Patterns", CREATE_SPATIAL_PATTERNS_SQL),
     ("Index Spatial Patterns", INDEX_SPATIAL_PATTERNS_SQL),
     ("Create Refresh Function", CREATE_REFRESH_FUNCTION_SQL),
+    ("Create Choropleth Analytics", CREATE_CHOROPLETH_ANALYTICS_SQL),
+    ("Create Choropleth Analytics Indices", CREATE_CHOROPLETH_ANALYTICS_INDICES)
 ]
 
 def get_db_connection(retry_count=3, retry_delay=5):
@@ -368,6 +558,21 @@ def execute_sql_command(connection, description, sql_command, continue_on_error=
         with connection.cursor() as cursor:
             logger.info(f"Executing: {description}...")
             start_time = time.time()
+            
+            # Check if the view already exists for CREATE MATERIALIZED VIEW commands
+            if "CREATE MATERIALIZED VIEW" in sql_command:
+                view_name = sql_command.split("CREATE MATERIALIZED VIEW")[1].split("AS")[0].strip()
+                cursor.execute(f"""
+                    SELECT EXISTS (
+                        SELECT 1 FROM pg_matviews 
+                        WHERE schemaname = 'geo_insights' 
+                        AND matviewname = '{view_name}'
+                    );
+                """)
+                view_exists = cursor.fetchone()[0]
+                if view_exists:
+                    logger.info(f"Materialized view {view_name} already exists. Skipping creation.")
+                    return True, None
             
             # Use execute_batch for multi-statement SQL commands that might contain errors
             if ";" in sql_command and not sql_command.strip().upper().startswith("SELECT"):
