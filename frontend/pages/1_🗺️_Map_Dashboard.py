@@ -37,7 +37,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "336699")
 st.markdown("""
 <style>
     /* Modern UI styles */
-    h1 {
+     h1 {
         margin-bottom: 0.5rem;
         color: #1E3D59;
     }
@@ -519,8 +519,10 @@ def create_cluster_map(df, lat_col, lon_col, popup_cols=None):
     marker_cluster = plugins.MarkerCluster().add_to(m)
     
     # Add markers to the cluster
+    # Add markers to the cluster
     for idx, row in df.iterrows():
         if pd.notna(row[lat_col]) and pd.notna(row[lon_col]):
+            # --- Start of the block that needs to be indented ---
             # Create popup content
             popup_content = ""
             if popup_cols:
@@ -540,17 +542,18 @@ def create_cluster_map(df, lat_col, lon_col, popup_cols=None):
                                 value = f"{value:,.2f}" # Default numeric format
                         popup_content += f"<b>{col.replace('_', ' ').title()}:</b> {value}<br>"
                 popup_content += "</div>"
-            
+
             # Add marker with popup
             folium.Marker(
                 location=[row[lat_col], row[lon_col]],
                 popup=folium.Popup(popup_content, max_width=300) if popup_content else None,
                 icon=folium.Icon(icon="info-sign", color="cadetblue")
             ).add_to(marker_cluster)
-    
-    # Add fullscreen control
+            # --- End of the block that needs to be indented ---
+
+    # Add fullscreen control (This should remain unindented relative to the 'if' on line 523)
     plugins.Fullscreen().add_to(m)
-    
+
     return m
 
 def create_industry_hotspot_map(df, region_gdf):

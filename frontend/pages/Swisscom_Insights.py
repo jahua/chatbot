@@ -10,24 +10,32 @@ import json
 # Set the page config - Streamlit uses filename, but we can set title
 st.set_option('deprecation.showPyplotGlobalUse', False)
 
-# --- Database Connection (Reads from st.session_state) ---
+# --- Database Connection (Reads from st.session_state provided by app.py) ---
 def connect_to_db():
     """Establish connection to PostgreSQL database using config from session state"""
     if 'db_config' not in st.session_state:
         st.error("Database configuration not found in session state. Ensure main app initializes st.session_state.db_config.")
         return None, None
+    
     db_config = st.session_state.db_config
     required_keys = ["host", "port", "dbname", "user", "password"]
-    if not all(key in db_config and db_config[key] for key in required_keys):
-        st.error("Database connection details missing in session state configuration.")
+    
+    # Check if all required keys exist and have values
+    if not all(db_config.get(key) for key in required_keys):
+        st.error("Database connection details are incomplete in session state.")
+        st.sidebar.warning("Current DB Config (Incomplete):")
+        st.sidebar.json(db_config) # Show config for debugging
         return None, None
+        
     try:
         conn = psycopg2.connect(**db_config)
         cursor = conn.cursor()
-        # Removed SET search_path - assume schema is handled in queries if needed
+        st.sidebar.success(f"DB Connected: {db_config['dbname']}@{db_config['host']}") # Moved to sidebar
         return conn, cursor
     except psycopg2.Error as e:
         st.error(f"Database connection error: {str(e)}")
+        st.sidebar.error("DB Config Used (Failed):")
+        st.sidebar.json(db_config) # Show failing config
         return None, None
 
 # --- Direct Access to aoi_days_raw ---
@@ -417,100 +425,100 @@ def run_page():
     use_mock_data = False
     error_occurred = False
     
-    # Check which data source method to use based on user selection
-    data_source_method = st.session_state.data_source
-    
-    # Check DB config and attempt connection
-    if 'db_config' not in st.session_state:
-        # For testing: initialize a sample db_config if not provided
-        st.session_state.db_config = {
-            "host": "localhost",
-            "port": "5432",
-            "dbname": "tourism_data",
-            "user": "postgres",
-            "password": "password"
-        }
-        st.warning("Using default database configuration for testing. Update it in your main app.")
-    
-    if not all(st.session_state.db_config.values()):
-        st.warning("Database connection details are not fully configured. Using sample data.")
-        use_mock_data = True
-    else:
-        conn, cursor = connect_to_db()
-        if conn and cursor:
-            st.session_state.db_connected = True 
-            try:
-                if data_source_method == "Sample Data":
-                    use_mock_data = True
-                elif data_source_method == "Direct from aoi_days_raw":
-                    # Use direct access method
-                    st.info("Using direct access to aoi_days_raw table.")
-                    data = fetch_directly_from_raw(cursor, selected_region, selected_month, selected_year)
-                    if data is None:
-                        st.warning("No data found using direct access. Falling back to sample data.")
-                        use_mock_data = True
-                else:  # Database Views
-                    # Use views
-                    st.info("Using database views for data retrieval.")
-                    
-                    # Fetch all data; functions return None on error, empty DF if no data
-                    tourist_categories_df = fetch_tourist_categories(cursor, selected_region, selected_month, selected_year)
-                    dwell_time_df = fetch_dwell_time(cursor, selected_region, selected_month, selected_year)
-                    age_gender_df = fetch_age_gender(cursor, selected_region, selected_month, selected_year)
-                    top_municipalities_df = fetch_top_municipalities(cursor, selected_region, selected_month, selected_year)
-                    
-                    # Check if ANY fetch operation returned None (error)
-                    if None in [tourist_categories_df, dwell_time_df, age_gender_df, top_municipalities_df]:
-                        st.error("Error fetching data from database views. Check specific errors above. Falling back to direct access.")
-                        
-                        # Try direct access as fallback
-                        data = fetch_directly_from_raw(cursor, selected_region, selected_month, selected_year)
-                        if data is None:
-                            use_mock_data = True
-                            error_occurred = True
-                    else:
-                        # All fetches succeeded, combine the data
-                        data = {
-                            "tourist_categories": tourist_categories_df,
-                            "dwell_time": dwell_time_df,
-                            "age_gender": age_gender_df,
-                            "top_municipalities": top_municipalities_df
-                        }
-                        # Check if we actually got any data rows across all tables
-                        if all(df.empty for df in data.values()):
-                            st.info("No data found in database views for the selected filters. Trying direct access.")
-                            # Try direct access as fallback
+    data_source_method = st.session_state.get('data_source', "Database Views") # Use the correct key
+
+    conn, cursor = None, None # Initialize outside try
+
+    # --- Main Try Block for Connection and Data Fetching ---
+    try:
+        # Check DB config validity ONLY IF we intend to use the DB
+        if data_source_method != "Sample Data":
+            if 'db_config' not in st.session_state or not all(st.session_state.db_config.values()):
+                st.warning("Database connection details missing or incomplete. Using sample data.")
+                use_mock_data = True
+            else:
+                # Attempt connection ONLY if config seems valid and not using sample data
+                conn, cursor = connect_to_db()
+                if conn and cursor:
+                    st.session_state.db_connected = True 
+                    try: # Inner try for data fetching logic
+                        if data_source_method == "Direct from aoi_days_raw":
+                            st.info("Using direct access to aoi_days_raw table.")
                             data = fetch_directly_from_raw(cursor, selected_region, selected_month, selected_year)
                             if data is None:
+                                st.warning("No data found using direct access. Falling back to sample data.")
                                 use_mock_data = True
-                        else:
-                            st.success("Displaying data from database views.")
+                        else:  # Database Views (Default)
+                            st.info("Using database views for data retrieval.")
+                            tourist_categories_df = fetch_tourist_categories(cursor, selected_region, selected_month, selected_year)
+                            dwell_time_df = fetch_dwell_time(cursor, selected_region, selected_month, selected_year)
+                            age_gender_df = fetch_age_gender(cursor, selected_region, selected_month, selected_year)
+                            top_municipalities_df = fetch_top_municipalities(cursor, selected_region, selected_month, selected_year)
                             
-            except Exception as e:
-                st.error(f"An unexpected error occurred during database processing: {e}. Using sample data.")
-                use_mock_data = True
-                error_occurred = True
-            finally:
-                if cursor: cursor.close()
-                if conn: conn.close()
-        else:
-            # connect_to_db failed
-            st.session_state.db_connected = False
-            st.error("Database connection failed. Using sample data.")
+                            if None in [tourist_categories_df, dwell_time_df, age_gender_df, top_municipalities_df]:
+                                st.error("Error fetching data from views. Falling back to direct access (if possible).")
+                                error_occurred = True
+                                data = fetch_directly_from_raw(cursor, selected_region, selected_month, selected_year)
+                                if data is None:
+                                    st.warning("Direct access fallback failed. Using sample data.")
+                                    use_mock_data = True
+                            else:
+                                data = {
+                                    "tourist_categories": tourist_categories_df, "dwell_time": dwell_time_df,
+                                    "age_gender": age_gender_df, "top_municipalities": top_municipalities_df
+                                }
+                                if all(df.empty for df in data.values()):
+                                    st.info("No data found in views. Trying direct access.")
+                                    data = fetch_directly_from_raw(cursor, selected_region, selected_month, selected_year)
+                                    if data is None:
+                                        st.warning("Direct access fallback returned no data. Using sample data.")
+                                        use_mock_data = True
+                                else:
+                                    st.success("Displaying data from database views.")
+                                    
+                    except Exception as e: # Catch errors during data fetching
+                        st.error(f"An error occurred during data processing: {e}. Using sample data.")
+                        use_mock_data = True
+                        error_occurred = True
+                
+                # If connection failed (conn is None or cursor is None after connect_to_db call)
+                elif not use_mock_data: # Check we haven't already decided to use mock data
+                    st.session_state.db_connected = False 
+                    # connect_to_db already showed the error
+                    st.warning("Database connection failed. Using sample data.")
+                    use_mock_data = True
+                    error_occurred = True
+        
+        # If user selected Sample Data directly
+        else: 
             use_mock_data = True
-            error_occurred = True
+            st.info("Using sample data as requested.")
+
+    # Catch unexpected errors outside connection/fetching (e.g., in filter logic)
+    except Exception as e:
+         st.error(f"An unexpected error occurred in the main process: {e}. Using sample data.")
+         use_mock_data = True
+         error_occurred = True
+         if cursor: cursor.close() # Try to close if cursor exists
+         if conn: conn.close() # Try to close if conn exists
+         conn, cursor = None, None # Ensure they are reset
+         
+    finally: # Always ensure connection is closed if opened
+        if cursor: cursor.close()
+        if conn: conn.close()
 
     # Generate mock data if needed
     if use_mock_data:
         data = get_sample_data(selected_region, selected_month, selected_year)
         st.info("Using sample data for visualization.")
         
-    # Render the dashboard tabs if data is available (either real or mock)
+    # Render the dashboard tabs if data is available
     if data:
         render_tabs(data)
+    elif not error_occurred:
+        st.warning("No data available to display. Check connection or filters.")
     else:
-        # This should only happen if DB config was bad AND mock data failed
-        st.error("Failed to load or generate data.")
+        st.error("Failed to load or generate any data.")
 
 # --- Sidebar Content --- 
 def render_sidebar():
@@ -551,19 +559,6 @@ def render_sidebar():
         Check the SQL schema documentation for detailed instructions.
         """)
 
-# --- Run App (Main Entry Point) ---
-if __name__ == "__main__":
-    # For this page to work independently
-    if 'db_config' not in st.session_state:
-        # Set a default DB config for testing
-        st.session_state.db_config = {
-            "host": "localhost", 
-            "port": "5432",
-            "dbname": "tourism_db",
-            "user": "postgres",
-            "password": "password"
-        }
-    
-    # Render the sidebar and main content
-    render_sidebar()
-    run_page()
+# --- Keep only function calls needed when run as a page ---
+render_sidebar()
+run_page()

@@ -14,10 +14,131 @@ import plotly.graph_objects as go
 import base64
 from io import BytesIO
 from PIL import Image
+from dotenv import load_dotenv
+
+# --- Load .env ONCE at the very top ---
+dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+if os.path.exists(dotenv_path):
+    print(f"DEBUG app.py: Loading .env from: {dotenv_path}")
+    # Use override=True to ensure .env values take precedence over environment variables
+    load_dotenv(dotenv_path=dotenv_path, override=True)
+    print(f"DEBUG app.py: Loaded .env. Checking POSTGRES_HOST: {os.getenv('POSTGRES_HOST')}")
+else:
+    print(f"DEBUG app.py: Warning - .env file not found at: {dotenv_path}")
+# ---------------------------------------
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# --- Initialize session state ONCE --- 
+if 'db_config' not in st.session_state:
+    print("DEBUG app.py: Initializing st.session_state.db_config...")
+    st.session_state.db_config = {
+        "host": os.getenv("POSTGRES_HOST"),
+        "port": os.getenv("POSTGRES_PORT", "5432"),
+        "dbname": os.getenv("POSTGRES_DB"),
+        "user": os.getenv("POSTGRES_USER"),
+        "password": os.getenv("POSTGRES_PASSWORD")
+    }
+    # Check if loading worked
+    if not all(st.session_state.db_config.get(key) for key in ["host", "port", "dbname", "user", "password"]):
+         print(f"DEBUG app.py: Warning - Some DB config values are missing after loading .env. Config: {st.session_state.db_config}")
+    else:
+        print("DEBUG app.py: DB config appears loaded into session state.")
+else:
+    print("DEBUG app.py: st.session_state.db_config already exists.")
+# ---------------------------------------
+
+# -- Initialize other session states ONCE --
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "current_chat_id" not in st.session_state:
+    st.session_state.current_chat_id = str(uuid.uuid4())
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = {}
+if "conversations" not in st.session_state:
+    st.session_state.conversations = []
+if "current_conversation_index" not in st.session_state:
+    st.session_state.current_conversation_index = 0
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+if "last_request_id" not in st.session_state:
+    st.session_state.last_request_id = None
+if "processed_queries" not in st.session_state:
+    st.session_state.processed_queries = set()
+# -----------------------------------------
+
+# --- Define process_query function EARLY ---
+def process_query(query: str):
+    """Process a query and update the chat interface"""
+    if not query:
+        return
+
+    # Check if we've already processed this query in this session
+    if query in st.session_state.processed_queries:
+        logger.debug(f"Skipping already processed query: {query}")
+        return
+    
+    # Add to processed queries set immediately to prevent duplicate processing
+    st.session_state.processed_queries.add(query)
+    
+    # Generate a unique request ID to track this specific request
+    request_id = str(uuid.uuid4())
+    st.session_state.last_request_id = request_id
+        
+    # Add user message
+    st.session_state.messages.append({"role": "user", "content": query, "request_id": request_id})
+    st.session_state.processing = True
+    
+    try:
+        logger.debug(f"Sending query to API: {query}")
+        # Make API call
+        response = requests.post(
+            "http://localhost:8000/chat",
+            json={"message": query},
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            try:
+                response_data = response.json()
+                logger.debug(f"Received response for request {request_id}")
+                
+                # Add bot response to chat
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response_data.get("response", "Sorry, I couldn't generate a response."),
+                    "visualization": response_data.get("visualization"),
+                    "request_id": request_id
+                })
+                
+            except json.JSONDecodeError as e:
+                st.error(f"Error parsing response: {str(e)}")
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": "Sorry, I encountered an error processing the response.",
+                    "request_id": request_id
+                })
+        else:
+            st.error(f"Error: Server returned status code {response.status_code}")
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": f"Sorry, there was an error processing your request. Status code: {response.status_code}",
+                "request_id": request_id
+            })
+    except requests.RequestException as e:
+        st.error(f"Error connecting to server: {str(e)}")
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": "Sorry, I couldn't connect to the server. Please try again later.",
+            "request_id": request_id
+        })
+    finally:
+        st.session_state.processing = False
+        # Force a rerun to update the UI immediately
+        st.rerun()
+# --- END Define process_query function ---
 
 def display_rag_flow(steps: List[Dict[str, Any]], visualization: Optional[str] = None):
     """Display the RAG flow steps and visualization"""
@@ -231,99 +352,6 @@ footer {visibility: hidden;}
 }
 </style>
 """, unsafe_allow_html=True)
-
-# Initialize session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "conversations" not in st.session_state:
-    st.session_state.conversations = []
-if "current_conversation_index" not in st.session_state:
-    st.session_state.current_conversation_index = 0
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(datetime.now().timestamp())
-if "model" not in st.session_state:
-    st.session_state.model = "claude"
-if 'should_clear_input' not in st.session_state:
-    st.session_state.should_clear_input = False
-if 'user_input' not in st.session_state:
-    st.session_state.user_input = ""
-if "processing" not in st.session_state:
-    st.session_state.processing = False
-if "last_request_id" not in st.session_state:
-    st.session_state.last_request_id = None
-if "processed_queries" not in st.session_state:
-    st.session_state.processed_queries = set()
-
-def process_query(query: str):
-    """Process a query and update the chat interface"""
-    if not query:
-        return
-
-    # Check if we've already processed this query in this session
-    if query in st.session_state.processed_queries:
-        logger.debug(f"Skipping already processed query: {query}")
-        return
-    
-    # Add to processed queries set immediately to prevent duplicate processing
-    st.session_state.processed_queries.add(query)
-    
-    # Generate a unique request ID to track this specific request
-    request_id = str(uuid.uuid4())
-    st.session_state.last_request_id = request_id
-        
-    # Add user message
-    st.session_state.messages.append({"role": "user", "content": query, "request_id": request_id})
-    st.session_state.processing = True
-    
-    try:
-        logger.debug(f"Sending query to API: {query}")
-        # Make API call
-        response = requests.post(
-            "http://localhost:8000/chat",
-            json={"message": query},
-            headers={"Content-Type": "application/json"}
-        )
-        
-        if response.status_code == 200:
-            try:
-                response_data = response.json()
-                logger.debug(f"Received response for request {request_id}")
-                
-                # Add bot response to chat
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": response_data.get("response", "Sorry, I couldn't generate a response."),
-                    "visualization": response_data.get("visualization"),
-                    "request_id": request_id
-                })
-                
-            except json.JSONDecodeError as e:
-                st.error(f"Error parsing response: {str(e)}")
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": "Sorry, I encountered an error processing the response.",
-                    "request_id": request_id
-                })
-        else:
-            st.error(f"Error: Server returned status code {response.status_code}")
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": f"Sorry, there was an error processing your request. Status code: {response.status_code}",
-                "request_id": request_id
-            })
-    except requests.RequestException as e:
-        st.error(f"Error connecting to server: {str(e)}")
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": "Sorry, I couldn't connect to the server. Please try again later.",
-            "request_id": request_id
-        })
-    finally:
-        st.session_state.processing = False
-        # Force a rerun to update the UI immediately
-        st.rerun()
 
 # Sidebar for chat history and settings
 with st.sidebar:
