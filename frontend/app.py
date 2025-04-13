@@ -514,4 +514,4 @@ with st.form(key="chat_form", clear_on_submit=True):
 
 # Footer
 st.markdown("---")
-st.markdown("Built with Streamlit and LangGraph") 
+st.markdown("Built with LangChain, Streamlit and Plotly 🤖😊") 
