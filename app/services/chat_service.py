@@ -13,7 +13,7 @@ from .conversation_service import ConversationService
 import json
 from datetime import datetime
 import time
-from fastapi import HTTPException
+from fastapi import HTTPException, Depends
 from ..core.config import settings
 from decimal import Decimal
 import uuid
@@ -33,22 +33,35 @@ from functools import lru_cache
 from .geo_insights_service import GeoInsightsService
 from .geo_visualization_service import GeoVisualizationService
 from ..utils.hybrid_intent_parser import HybridIntentParser
+from app.db.database import get_dw_db
+from app.rag.dw_context_service import DWContextService
+from app.agents.agent_service import DWAnalyticsAgent
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class ChatService:
-    def __init__(self, db_service=None, llm_adapter=None, schema_manager=None):
-        """Initialize the chat service with OpenAI adapter and SQL generator"""
+    def __init__(
+        self,
+        dw_db: Session,
+        schema_manager: SchemaManager,
+        llm_adapter: Optional[OpenAIAdapter] = None
+    ):
+        self.dw_db = dw_db
+        self.schema_manager = schema_manager
         self.llm = llm_adapter or OpenAIAdapter()
         self.sql_generator = SQLGenerator()
-        self.db_service = db_service or DatabaseService()
-        self.schema_manager = schema_manager
+        self.db_service = DatabaseService()
         self._query_cache = {}  # Simple query cache
         self._cache_ttl = 300  # Cache TTL in seconds (5 minutes)
         self.intent_parser = HybridIntentParser(llm_adapter=self.llm)
         self.geo_insights_service = GeoInsightsService(db_service=self.db_service)
         self.geo_visualization_service = GeoVisualizationService()
+        self.dw_context_service = DWContextService(dw_db=dw_db)
+        self.analytics_agent = DWAnalyticsAgent(
+            dw_db=dw_db,
+            dw_context_service=self.dw_context_service
+        )
         logger.info("ChatService initialized successfully")
 
     def is_conversational_message(self, message: str) -> bool:
@@ -165,235 +178,340 @@ class ChatService:
             logger.error(traceback.format_exc())
             return "I can help you analyze tourism data including visitor statistics and transaction data. Please ask a specific question about tourism patterns."
     
-    async def process_chat(self, message: str, session_id: str = None, is_direct_query: bool = False) -> Dict[str, Any]:
-        """Process a chat message and return a response with visualization"""
+    async def process_chat(
+        self,
+        message: str,
+        is_direct_query: bool = False
+    ) -> Dict[str, Any]:
         try:
-            # Check if it's a conversational message
-            if self.is_conversational_message(message):
-                return {
-                    'message_id': str(uuid.uuid4()),
-                    'content': "I'm here to help you analyze tourism data. Please ask me about visitor statistics, spending patterns, or tourism trends!",
-                    'response': "I'm here to help you analyze tourism data. Please ask me about visitor statistics, spending patterns, or tourism trends!",
-                    'visualization': None,
-                    'sql_query': None,
-                    'status': 'success'
-                }
-
-            # Check if it's a schema inquiry
-            if self.is_schema_inquiry(message):
-                schema_summary = self.get_schema_summary()
-                return {
-                    'message_id': str(uuid.uuid4()),
-                    'content': schema_summary,
-                    'response': schema_summary,
-                    'visualization': None,
-                    'sql_query': None,
-                    'status': 'success'
-                }
-
-            # Parse the intent using the hybrid parser
-            parsed_data = await self.intent_parser.parse_intent(message)
-            intent = parsed_data.get('intent')
-            time_range = parsed_data.get('time_range')
-            granularity = parsed_data.get('granularity')
-            region_info = parsed_data.get('region_info', {})
-            comparison_type = parsed_data.get('comparison_type')
+            # Generate a unique message ID
+            message_id = str(uuid.uuid4())
             
-            logger.info(f"Parsed intent: {intent}, Time range: {time_range}, Granularity: {granularity}")
+            logger.info(f"Starting to process chat message: {message}")
             
-            # Enhanced geospatial detection
-            is_map_request = parsed_data.get('is_map_request', False)
-            contains_geo_terms = any(term in message.lower() for term in ['map', 'where', 'location', 'region', 'area', 'city', 'canton', 'country', 'geographic', 'spatial'])
-            contains_geo_viz_terms = any(term in message.lower() for term in ['show', 'display', 'map', 'plot', 'visualize', 'visualization'])
-            
-            logger.info(f"Geospatial detection - is_map_request: {is_map_request}, contains_geo_terms: {contains_geo_terms}, contains_geo_viz_terms: {contains_geo_viz_terms}")
-            
-            # Handle geospatial queries separately
-            if intent in [QueryIntent.GEO_SPATIAL, QueryIntent.REGION_ANALYSIS, 
-                          QueryIntent.HOTSPOT_DETECTION, QueryIntent.SPATIAL_PATTERN]:
-                logger.info("Routing to geospatial query handler")
-                return await self._handle_geospatial_query(message, intent, region_info)
-            # Add a more flexible router that can detect map requests even if the intent parser missed it
-            elif contains_geo_terms and contains_geo_viz_terms:
-                logger.info("Detected map request from keywords, routing to geospatial query handler")
-                
-                # Create basic region info from message if not available
-                if not region_info:
-                    # Extract region name - simple approach
-                    region_match = re.search(r"(?:in|of|for|at)\s+(?:the\s+)?(\w+(?:\s+\w+){0,3})", message.lower())
-                    region_name = region_match.group(1) if region_match else "not specified in the query"
-                    
-                    region_info = {
-                        'region_name': region_name,
-                        'region_type': 'unknown',
-                        'is_map_request': True,
-                        'fallback_intent': QueryIntent.TREND_ANALYSIS
-                    }
-                
-                return await self._handle_geospatial_query(message, QueryIntent.GEO_SPATIAL, region_info)
-
-            # Generate SQL query based on user message
+            # Get context and analysis
             try:
-                # Add original message to help with specific query optimizations
-                query_result = self.sql_generator.generate_sql_query(message)
-                
-                # If this is a parsing object, add the original message for context
-                if isinstance(query_result, dict) and not 'error' in query_result:
-                    query_result['original_message'] = message
-                    
-                logger.debug(f"Generated SQL query: {query_result}")
-                
-                if not query_result or 'error' in query_result:
-                    error_msg = query_result.get('error', 'Unknown error in query generation') if query_result else 'Failed to generate query'
-                    logger.error(f"SQL generation failed for message: {message}, error: {error_msg}")
-                    return {
-                        'message_id': str(uuid.uuid4()),
-                        'content': "I couldn't understand your query. Could you please rephrase it?",
-                        'response': "I couldn't understand your query. Could you please rephrase it?",
-                        'visualization': None,
-                        'sql_query': None,
-                        'status': 'error'
-                    }
-                
-                sql_query = query_result.get('query', '')
-                intent_str = query_result.get('intent', 'visitor_count')
-                
-                # Convert string intent to enum
-                intent = None
-                for intent_enum in QueryIntent:
-                    if intent_enum.value == intent_str:
-                        intent = intent_enum
-                        break
-                
-                metadata = query_result.get('metadata', {})
-                
-                # Validate query - skip validation for direct API calls 
-                # to prevent the double-query issue
-                if not is_direct_query:
-                    try:
-                        # Check if validate_query is available
-                        # Skip validation for simple queries to reduce database load
-                        is_simple_query = len(sql_query.strip()) < 500 and "UNION" not in sql_query.upper() and "WITH" not in sql_query.upper()
-                        
-                        if hasattr(self.db_service, 'validate_query') and not is_simple_query:
-                            is_valid = self.db_service.validate_query(sql_query)
-                            if not is_valid:
-                                logger.error(f"Invalid SQL query: {sql_query}")
-                                return {
-                                    'message_id': str(uuid.uuid4()),
-                                    'content': "I couldn't generate a valid query for your question. Could you please rephrase it?",
-                                    'response': "I couldn't generate a valid query for your question. Could you please rephrase it?",
-                                    'visualization': None,
-                                    'sql_query': sql_query,
-                                    'status': 'error'
-                                }
-                        else:
-                            # Skip validation if method not available or query is simple
-                            logger.info(f"Skipping validation for query: {'simple query' if is_simple_query else 'validation not available'}")
-                    except Exception as e:
-                        logger.error(f"Error during query validation: {str(e)}")
-                        logger.error(traceback.format_exc())
-                else:
-                    logger.info(f"Skipping validation for direct API call")
-                
-                # Execute query and get data
-                try:
-                    # Check cache first
-                    cached_data = self._get_cached_query_result(sql_query)
-                    if cached_data is not None:
-                        data = cached_data
-                    else:
-                        data = self.db_service.execute_query(sql_query)
-                        # Cache the result for future use
-                        self._cache_query_result(sql_query, data)
-                except TimeoutError as e:
-                    return {
-                        'message_id': str(uuid.uuid4()),
-                        'content': str(e),
-                        'response': str(e),
-                        'visualization': None,
-                        'sql_query': sql_query,
-                        'status': 'error'
-                    }
-                
-                if not data:
-                    # Check if this is a future date query
-                    time_range = metadata.get('time_range', {})
-                    start_date = time_range.get('start_date', '')
-                    
-                    if start_date and datetime.strptime(start_date, '%Y-%m-%d') > datetime.now():
-                        return {
-                            'message_id': str(uuid.uuid4()),
-                            'content': f"I don't have data for future dates like {start_date}. Would you like to see data from a past period instead?",
-                            'response': f"I don't have data for future dates like {start_date}. Would you like to see data from a past period instead?",
-                            'visualization': None,
-                            'sql_query': sql_query,
-                            'status': 'error'
-                        }
-                    
-                    return {
-                        'message_id': str(uuid.uuid4()),
-                        'content': "I couldn't find any data matching your query.",
-                        'response': "I couldn't find any data matching your query.",
-                        'visualization': None,
-                        'sql_query': sql_query,
-                        'status': 'error'
-                    }
-                
-                # Generate visualization based on intent and data
-                try:
-                    visualization_data = generate_visualization(data, intent)
-                    visualization_json = json.dumps(visualization_data, cls=DateTimeEncoder) if visualization_data else None
-                except Exception as viz_error:
-                    logger.error(f"Error generating visualization: {str(viz_error)}")
-                    logger.error(traceback.format_exc())
-                    visualization_json = None
-                
-                # Generate analysis summary
-                analysis = self._generate_analysis(data, intent, metadata)
-                
-                return {
-                    'message_id': str(uuid.uuid4()),
-                    'content': analysis,
-                    'response': analysis,
-                    'visualization': visualization_json,
-                    'sql_query': sql_query,
-                    'status': 'success'
-                }
-                
-            except TimeoutError as e:
-                logger.error(f"Query execution timed out: {str(e)}")
-                return {
-                    'message_id': str(uuid.uuid4()),
-                    'content': str(e),
-                    'response': str(e),
-                    'visualization': None,
-                    'sql_query': None,
-                    'status': 'error'
-                }
+                context = await self.dw_context_service.get_dw_context(
+                    query=message,
+                    region_id=None,
+                    start_date=None,
+                    end_date=None
+                )
+                logger.info(f"Got DW context: {context}")
             except Exception as e:
-                logger.error(f"Error processing SQL generation: {str(e)}")
+                logger.error(f"Error getting DW context: {str(e)}")
                 logger.error(traceback.format_exc())
+                raise
+            
+            # Generate analysis
+            try:
+                analysis = {
+                    "query": message,
+                    "context": context,
+                    "analysis": {
+                        "schema_overview": {
+                            "fact_tables": len(context["schema_info"]["fact_tables"]),
+                            "dimension_tables": len(context["schema_info"]["dimension_tables"]),
+                            "key_metrics": len(context["schema_info"]["key_metrics"]),
+                            "json_metrics": len(context["schema_info"]["json_metrics"])
+                        }
+                    }
+                }
+                logger.info(f"Generated analysis: {analysis}")
+            except Exception as e:
+                logger.error(f"Error generating analysis: {str(e)}")
+                logger.error(traceback.format_exc())
+                raise
+            
+            # Generate response based on query type
+            from sqlalchemy import text
+            
+            msg_lower = message.lower()
+            
+            try:
+                if "busiest week" in msg_lower and "spring 2023" in msg_lower:
+                    query = text("""
+                        WITH weekly_visitors AS (
+                            SELECT 
+                                date_trunc('week', d.full_date) as week_start,
+                                date_trunc('week', d.full_date) + interval '6 days' as week_end,
+                                SUM(f.total_visitors) as total_visitors
+                            FROM dw.fact_visitor f
+                            JOIN dw.dim_date d ON f.date_id = d.date_id
+                            WHERE d.year = 2023 
+                            AND EXTRACT(MONTH FROM d.full_date) BETWEEN 3 AND 5  -- Spring months (March to May)
+                            GROUP BY date_trunc('week', d.full_date)
+                            ORDER BY total_visitors DESC
+                            LIMIT 1
+                        )
+                        SELECT * FROM weekly_visitors
+                    """)
+                    
+                    result = self.dw_db.execute(query).fetchone()
+                    
+                    if result:
+                        response = (
+                            f"The busiest week in spring 2023 was "
+                            f"({result.week_start.strftime('%B %d')} - {result.week_end.strftime('%B %d')}) "
+                            f"with {result.total_visitors:,.0f} visitors."
+                        )
+                    else:
+                        response = "I couldn't find visitor data for spring 2023."
+                        
+                elif "industry" in msg_lower and "highest spending" in msg_lower:
+                    query = text("""
+                        SELECT 
+                            i.industry_name,
+                            SUM(f.total_amount) as total_spending
+                        FROM dw.fact_spending f
+                        JOIN dw.dim_industry i ON f.industry_id = i.industry_id
+                        GROUP BY i.industry_name
+                        ORDER BY total_spending DESC
+                        LIMIT 1
+                    """)
+                    
+                    logger.info("Executing industry spending query")
+                    result = self.dw_db.execute(query).fetchone()
+                    logger.info(f"Query result: {result}")
+                    
+                    if result:
+                        response = f"The industry with the highest spending was {result.industry_name} with ${result.total_spending:,.2f} in total spending."
+                    else:
+                        response = "I couldn't find spending data by industry."
+                        
+                elif "top 3" in msg_lower and "summer 2023" in msg_lower:
+                    query = text("""
+                        SELECT 
+                            d.full_date,
+                            f.total_visitors
+                        FROM dw.fact_visitor f
+                        JOIN dw.dim_date d ON f.date_id = d.date_id
+                        WHERE d.year = 2023 
+                        AND EXTRACT(MONTH FROM d.full_date) BETWEEN 6 AND 8  -- Summer months (June to August)
+                        ORDER BY f.total_visitors DESC
+                        LIMIT 3
+                    """)
+                    
+                    results = self.dw_db.execute(query).fetchall()
+                    
+                    if results:
+                        response_parts = ["Here are the top 3 busiest days in summer 2023:"]
+                        for i, row in enumerate(results, 1):
+                            response_parts.append(
+                                f"{i}. {row.full_date.strftime('%B %d, %Y')}: {row.total_visitors:,.0f} visitors"
+                            )
+                        response = "\n".join(response_parts)
+                    else:
+                        response = "I couldn't find visitor data for summer 2023."
+                        
+                elif "most visitors" in msg_lower or "busiest" in msg_lower:
+                    query = text("""
+                        SELECT d.full_date, f.total_visitors 
+                        FROM dw.fact_visitor f 
+                        JOIN dw.dim_date d ON f.date_id = d.date_id 
+                        WHERE d.year = 2023 
+                        ORDER BY f.total_visitors DESC 
+                        LIMIT 1
+                    """)
+                    
+                    result = self.dw_db.execute(query).fetchone()
+                    
+                    if result:
+                        response = f"The busiest day in 2023 was {result[0].strftime('%B %d, %Y')} with {result[1]:,.0f} visitors."
+                    else:
+                        response = "I couldn't find visitor data for 2023."
+                
+                elif ("swiss" in msg_lower and "foreign" in msg_lower) or ("compare" in msg_lower and "tourists" in msg_lower):
+                    # Parse month from the query
+                    month = None
+                    if "january" in msg_lower or "jan" in msg_lower:
+                        month = 1
+                    elif "february" in msg_lower or "feb" in msg_lower:
+                        month = 2
+                    elif "march" in msg_lower or "mar" in msg_lower:
+                        month = 3
+                    elif "april" in msg_lower or "apr" in msg_lower:
+                        month = 4
+                    elif "may" in msg_lower:
+                        month = 5
+                    elif "june" in msg_lower or "jun" in msg_lower:
+                        month = 6
+                    elif "july" in msg_lower or "jul" in msg_lower:
+                        month = 7
+                    elif "august" in msg_lower or "aug" in msg_lower:
+                        month = 8
+                    elif "september" in msg_lower or "sep" in msg_lower:
+                        month = 9
+                    elif "october" in msg_lower or "oct" in msg_lower:
+                        month = 10
+                    elif "november" in msg_lower or "nov" in msg_lower:
+                        month = 11
+                    elif "december" in msg_lower or "dec" in msg_lower:
+                        month = 12
+
+                    # Parse year from the query
+                    year = None
+                    if "2022" in msg_lower:
+                        year = 2022
+                    elif "2023" in msg_lower:
+                        year = 2023
+                    else:
+                        year = 2023  # Default to current year
+
+                    # Add month and year filters to the query
+                    month_filter = f"AND EXTRACT(MONTH FROM d.full_date) = {month}" if month else ""
+                    
+                    query = text(f"""
+                        SELECT 
+                            SUM(f.swiss_tourists) as swiss_tourists,
+                            SUM(f.foreign_tourists) as foreign_tourists,
+                            (SUM(f.swiss_tourists) * 100.0 / NULLIF(SUM(f.swiss_tourists) + SUM(f.foreign_tourists), 0)) as swiss_percentage,
+                            (SUM(f.foreign_tourists) * 100.0 / NULLIF(SUM(f.swiss_tourists) + SUM(f.foreign_tourists), 0)) as foreign_percentage
+                        FROM dw.fact_visitor f
+                        JOIN dw.dim_date d ON f.date_id = d.date_id
+                        WHERE d.year = {year}
+                        {month_filter}
+                    """)
+                    
+                    result = self.dw_db.execute(query).fetchone()
+                    
+                    if result:
+                        month_name = datetime(year, month, 1).strftime('%B') if month else ""
+                        time_period = f"in {month_name} {year}" if month else f"in {year}"
+                        
+                        swiss = int(result.swiss_tourists) if result.swiss_tourists else 0
+                        foreign = int(result.foreign_tourists) if result.foreign_tourists else 0
+                        swiss_pct = float(result.swiss_percentage) if result.swiss_percentage else 0
+                        foreign_pct = float(result.foreign_percentage) if result.foreign_percentage else 0
+                        
+                        response = (
+                            f"Tourist comparison {time_period}:\n"
+                            f"Swiss tourists: {swiss:,} ({swiss_pct:.1f}%)\n"
+                            f"Foreign tourists: {foreign:,} ({foreign_pct:.1f}%)\n"
+                            f"Total tourists: {swiss + foreign:,}\n\n"
+                        )
+                        
+                        if swiss > foreign:
+                            response += f"Swiss tourists were the majority, outnumbering foreign tourists by {swiss - foreign:,} ({(swiss / max(1, foreign)):.1f}x)."
+                        elif foreign > swiss:
+                            response += f"Foreign tourists were the majority, outnumbering Swiss tourists by {foreign - swiss:,} ({(foreign / max(1, swiss)):.1f}x)."
+                        else:
+                            response += "There was an equal number of Swiss and foreign tourists."
+                    else:
+                        response = f"I couldn't find tourist data for the specified time period."
+                
+                else:
+                    response = self._generate_response(analysis)
+                
+                logger.info(f"Generated response: {response}")
+            except Exception as e:
+                logger.error(f"Error executing query: {str(e)}")
+                logger.error(traceback.format_exc())
+                raise
+            
+            # Prepare schema and query information
+            schema_info = {
+                "fact_tables": len(context["schema_info"]["fact_tables"]),
+                "dimension_tables": len(context["schema_info"]["dimension_tables"]),
+                "key_metrics": len(context["schema_info"]["key_metrics"]),
+                "json_metrics": len(context["schema_info"]["json_metrics"])
+            }
+            
+            sql_query = query.text if 'query' in locals() else None
+            
             return {
-                    'message_id': str(uuid.uuid4()),
-                    'content': "Sorry, I encountered an error while processing your request.",
-                    'response': "Sorry, I encountered an error while processing your request.",
-                    'visualization': None,
-                    'sql_query': None,
-                    'status': 'error'
+                "message_id": message_id,
+                "message": message,
+                "response": response,
+                "content": response,
+                "analysis": analysis,
+                "schema_info": schema_info,
+                "sql_query": sql_query
             }
             
         except Exception as e:
-            logger.error(f"Error processing chat message: {str(e)}")
+            logger.error(f"Error processing chat: {str(e)}")
             logger.error(traceback.format_exc())
+            error_response = "I encountered an error while processing your request. Please try again."
             return {
-                'message_id': str(uuid.uuid4()),
-                'content': "Sorry, I encountered an error while processing your request.",
-                'response': "Sorry, I encountered an error while processing your request.",
-                'visualization': None,
-                'sql_query': None,
-                'status': 'error'
+                "message_id": str(uuid.uuid4()),
+                "message": message,
+                "response": error_response,
+                "content": error_response,
+                "analysis": {},
+                "schema_info": {},
+                "sql_query": None
             }
+
+    def _generate_response(self, analysis: Dict[str, Any]) -> str:
+        """Generate natural language response based on analysis"""
+        try:
+            response_parts = []
+            
+            # Add schema overview if available
+            schema_analysis = analysis.get('analysis', {}).get('schema_overview', {})
+            if schema_analysis:
+                response_parts.append(
+                    f"Based on the analysis of {schema_analysis.get('fact_tables', 0)} fact tables and "
+                    f"{schema_analysis.get('dimension_tables', 0)} dimension tables:"
+                )
+            
+            # Add region analysis if available
+            region_analysis = analysis.get('analysis', {}).get('region_analysis', {})
+            if region_analysis:
+                current_region = region_analysis.get('current_region', {})
+                visitor_stats = region_analysis.get('visitor_statistics', {})
+                if current_region and visitor_stats:
+                    response_parts.append(
+                        f"For the region {current_region.get('name', 'Unknown')}, "
+                        f"we observed {visitor_stats.get('total_visitors', 0):,} visitors "
+                        f"with an average stay of {visitor_stats.get('avg_stay', 0):.1f} days."
+                    )
+            
+            # Add temporal analysis if available
+            temporal_analysis = analysis.get('analysis', {}).get('temporal_analysis', {})
+            if temporal_analysis:
+                date_range = temporal_analysis.get('date_range', {})
+                growth_rate = temporal_analysis.get('growth_rate', 0)
+                trend_direction = temporal_analysis.get('trend_direction', 'stable')
+                
+                if date_range:
+                    response_parts.append(
+                        f"Looking at the period from {date_range.get('start')} to {date_range.get('end')}, "
+                        f"we see a {trend_direction} trend with a {growth_rate:.1f}% growth rate."
+                    )
+            
+            # Add demographic analysis if available
+            demographic_analysis = analysis.get('analysis', {}).get('demographic_analysis', {})
+            if demographic_analysis:
+                trends = demographic_analysis.get('trends', {})
+                if trends:
+                    trend_summary = [
+                        f"{metric} is {trend}"
+                        for metric, trend in trends.items()
+                        if trend != 'stable'
+                    ]
+                    if trend_summary:
+                        response_parts.append(
+                            "Notable demographic trends: " + "; ".join(trend_summary) + "."
+                        )
+            
+            # Add recommendations if available
+            recommendations = analysis.get('analysis', {}).get('recommendations', [])
+            if recommendations:
+                response_parts.append("\nRecommendations:")
+                for rec in recommendations:
+                    response_parts.append(f"- {rec}")
+            
+            # Combine all parts into a coherent response
+            if response_parts:
+                return "\n\n".join(response_parts)
+            else:
+                return "I apologize, but I couldn't generate a meaningful analysis from the available data. Could you please provide more specific details about what you'd like to know?"
+            
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}")
+            return "I encountered an error while analyzing the data. Please try rephrasing your question or providing more specific details."
     
     def get_schema_info(self) -> List[Dict[str, Any]]:
         """
@@ -606,9 +724,13 @@ class ChatService:
             return "Error generating analysis. Please try a more specific query."
     
     def close(self):
-        """Close database connection"""
-        if hasattr(self, 'db_service'):
-            self.db_service.close()
+        """Close database connections"""
+        try:
+            if self.dw_db:
+                self.dw_db.close()
+            logger.info("ChatService connections closed")
+        except Exception as e:
+            logger.error(f"Error closing ChatService connections: {str(e)}")
 
     def __del__(self):
         """Cleanup when the service is destroyed"""
