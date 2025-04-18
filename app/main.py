@@ -83,7 +83,6 @@ async def startup_event():
         
         # Initialize chat service
         chat_service = ChatService(
-            dw_db=dw_db,
             schema_service=schema_service,
             dw_context_service=dw_context_service,
             llm_adapter=llm_adapter
@@ -130,7 +129,9 @@ async def chat(
         response_parts = {}
         async for chunk in chat_service.process_chat_stream(
             message=request.message,
-            is_direct_query=is_direct_query
+            session_id=request.session_id if hasattr(request, 'session_id') else "default",
+            is_direct_query=is_direct_query,
+            dw_db=dw_db
         ):
             # Collect relevant parts of the response
             if "message_id" in chunk:
@@ -195,8 +196,10 @@ async def stream_chat(
                 # Process the chat request with streaming
                 async for chunk in chat_service.process_chat_stream(
                     message=request.message,
+                    session_id=request.session_id,
                     is_direct_query=is_direct_query,
-                    message_id=message_id
+                    message_id=message_id,
+                    dw_db=dw_db
                 ):
                     # If we receive a message_id, store it
                     if "message_id" in chunk:

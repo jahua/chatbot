@@ -26,11 +26,17 @@ class DebugService:
     def __init__(self):
         self.steps: List[DebugStep] = []
         self.current_step: Optional[DebugStep] = None
+        self.session_id: Optional[str] = None
+        self.message_id: Optional[str] = None
+        self.flow_start_time: Optional[datetime] = None
     
-    def start_flow(self) -> None:
-        """Start a new debug flow, clearing any existing steps"""
+    def start_flow(self, session_id: str, message_id: str) -> None:
+        """Start a new debug flow, clearing any existing steps and storing IDs."""
         self.clear()
-        logger.debug("Started new debug flow")
+        self.session_id = session_id
+        self.message_id = message_id
+        self.flow_start_time = datetime.now()
+        logger.debug(f"Started new debug flow for session {session_id}, message {message_id}")
     
     def start_step(self, name: str, details: Optional[Dict[str, Any]] = None) -> None:
         """Start a new step in the RAG flow"""
@@ -110,7 +116,14 @@ class DebugService:
         """Clear all steps and reset the debug service"""
         self.steps = []
         self.current_step = None
-        
+        self.session_id = None
+        self.message_id = None
+        self.flow_start_time = None
+    
+    def get_message_id(self) -> Optional[str]:
+        """Return the message ID for the current flow."""
+        return self.message_id
+    
     def get_debug_info_for_response(self) -> Dict[str, Any]:
         """Get debug information formatted for the response payload"""
         summary = self.get_flow_summary()
