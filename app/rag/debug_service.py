@@ -4,6 +4,8 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from dataclasses import dataclass, asdict
 import traceback
+import uuid
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -30,13 +32,20 @@ class DebugService:
         self.message_id: Optional[str] = None
         self.flow_start_time: Optional[datetime] = None
     
-    def start_flow(self, session_id: str, message_id: str) -> None:
+    def start_flow(self, session_id: str, message_id: Optional[str] = None) -> str:
         """Start a new debug flow, clearing any existing steps and storing IDs."""
         self.clear()
         self.session_id = session_id
+        
+        # Generate a message_id if not provided
+        if message_id is None:
+            message_id = str(uuid.uuid4())
+            
         self.message_id = message_id
         self.flow_start_time = datetime.now()
         logger.debug(f"Started new debug flow for session {session_id}, message {message_id}")
+        
+        return message_id
     
     def start_step(self, name: str, details: Optional[Dict[str, Any]] = None) -> None:
         """Start a new step in the RAG flow"""
@@ -55,26 +64,57 @@ class DebugService:
         if details:
             logger.debug(f"Step details: {json.dumps(details, indent=2)}")
     
-    def end_step(self, error: Optional[Exception] = None) -> None:
-        """End the current step"""
-        if not self.current_step:
-            return
+    def end_step(self, name: Optional[str] = None, success: bool = True, error: Optional[Any] = None, details: Optional[Dict[str, Any]] = None) -> None:
+        """End a step by name or the current step if no name is provided.
         
-        end_time = datetime.now()
-        duration = (end_time - self.current_step.start_time).total_seconds() * 1000
-        
-        self.current_step.end_time = end_time
-        self.current_step.duration_ms = duration
-        self.current_step.status = 'failed' if error else 'completed'
-        
-        if error:
-            self.current_step.error = str(error)
-            logger.error(f"Step {self.current_step.name} failed: {str(error)}")
-            logger.error(traceback.format_exc())
+        Args:
+            name: Name of the step to end (finds most recent if multiple steps with same name)
+            success: Whether the step was successful
+            error: Error message or exception object if there was an error
+            details: Additional details to add to the step
+        """
+        # Determine target step
+        target_step = None
+        if name:
+            # Find most recent step with this name by searching in reverse
+            for step in reversed(self.steps):
+                if step.name == name:  # Access attribute directly, not using get()
+                    target_step = step
+                    break
+            if not target_step:
+                logger.warning(f"Attempted to end non-existent step: {name}")
+                return
+        elif self.current_step:
+            target_step = self.current_step
         else:
-            logger.debug(f"Completed step: {self.current_step.name} in {duration:.2f}ms")
+            logger.warning("Attempted to end step, but no current step exists")
+            return
+            
+        # Calculate step duration
+        end_time = datetime.now()
+        target_step.end_time = end_time
+        duration = (end_time - target_step.start_time).total_seconds() * 1000
+        target_step.duration_ms = duration
+            
+        # Set the status based on success or error
+        if error:
+            target_step.status = "failed"
+            target_step.error = str(error)
+        else:
+            target_step.status = "completed"
         
-        self.current_step = None
+        # Add any details if provided
+        if details:
+            if target_step.details is None:
+                target_step.details = {}
+            target_step.details.update(details)
+            
+        # Log the step end
+        logger.debug(f"Ended step: {target_step.name} with status {target_step.status}")
+        
+        # Clear the current step if we're ending that one
+        if target_step is self.current_step:
+            self.current_step = None
     
     def add_step_details(self, details: Dict[str, Any]) -> None:
         """Add details to the current step"""
@@ -201,4 +241,41 @@ class DebugService:
             
             formatted_info['steps'].append(formatted_step)
             
-        return formatted_info 
+        return formatted_info
+    
+    def end_flow(self, success: bool = True) -> Dict[str, Any]:
+        """End the current flow and return debug info"""
+        # End any current step
+        if self.current_step:
+            self.end_step()
+        
+        # Get debug info
+        debug_info = self.get_debug_info_for_response()
+        
+        # Override status based on the success parameter
+        debug_info['status'] = 'success' if success else 'error'
+        
+        # Log the flow summary
+        self.log_flow_summary()
+        
+        return debug_info
+    
+    def update_step(self, name: str, details: Optional[Dict[str, Any]] = None) -> None:
+        """Update details for a specific step by name"""
+        # Find the step by name (most recent matching step)
+        target_step = None
+        for step in reversed(self.steps):
+            if step.name == name:
+                target_step = step
+                break
+                
+        if not target_step:
+            logger.warning(f"Attempted to update non-existent step: {name}")
+            return
+            
+        # Update details
+        if details:
+            if not target_step.details:
+                target_step.details = {}
+            target_step.details.update(details)
+            logger.debug(f"Updated step {name} details: {json.dumps(details, indent=2)}") 

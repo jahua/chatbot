@@ -317,4 +317,182 @@ class VisualizationService:
             return img_base64
         except Exception as e:
             logger.error(f"Error converting figure to base64: {str(e)}")
-            return "" 
+            return ""
+    
+    # Public methods that will be called by ChatService
+    def create_bar_chart(self, data: List[Dict[str, Any]], query_text: str = "Visitor data") -> Optional[str]:
+        """Create a bar chart visualization from the given data"""
+        try:
+            if self.debug_service:
+                self.debug_service.start_step("bar_chart_creation", {
+                    "data_rows": len(data),
+                    "query_text": query_text
+                })
+            
+            # Convert data to DataFrame
+            df = self._convert_to_dataframe(data)
+            
+            # Create bar chart
+            fig = self._create_bar_chart(df, query_text)
+            
+            # Convert to base64
+            img_base64 = self._fig_to_base64(fig)
+            
+            if self.debug_service:
+                self.debug_service.add_step_details({
+                    "visualization_type": "bar",
+                    "visualization_size": len(img_base64) if img_base64 else 0
+                })
+                self.debug_service.end_step()
+            
+            return img_base64
+        except Exception as e:
+            logger.error(f"Error creating bar chart: {str(e)}")
+            if self.debug_service:
+                self.debug_service.add_step_details({"error": str(e)})
+                self.debug_service.end_step(error=e)
+            return None
+    
+    def create_pie_chart(self, data: List[Dict[str, Any]], query_text: str = "Distribution data") -> Optional[str]:
+        """Create a pie chart visualization from the given data"""
+        try:
+            if self.debug_service:
+                self.debug_service.start_step("pie_chart_creation", {
+                    "data_rows": len(data),
+                    "query_text": query_text
+                })
+            
+            # Convert data to DataFrame
+            df = self._convert_to_dataframe(data)
+            
+            # Create pie chart
+            fig = self._create_pie_chart(df, query_text)
+            
+            # Convert to base64
+            img_base64 = self._fig_to_base64(fig)
+            
+            if self.debug_service:
+                self.debug_service.add_step_details({
+                    "visualization_type": "pie",
+                    "visualization_size": len(img_base64) if img_base64 else 0
+                })
+                self.debug_service.end_step()
+            
+            return img_base64
+        except Exception as e:
+            logger.error(f"Error creating pie chart: {str(e)}")
+            if self.debug_service:
+                self.debug_service.add_step_details({"error": str(e)})
+                self.debug_service.end_step(error=e)
+            return None
+    
+    def create_line_chart(self, data: List[Dict[str, Any]], query_text: str = "Trend data") -> Optional[str]:
+        """Create a line chart visualization from the given data"""
+        try:
+            if self.debug_service:
+                self.debug_service.start_step("line_chart_creation", {
+                    "data_rows": len(data),
+                    "query_text": query_text
+                })
+            
+            # Convert data to DataFrame
+            df = self._convert_to_dataframe(data)
+            
+            # Create line chart
+            fig = self._create_line_chart(df, query_text)
+            
+            # Convert to base64
+            img_base64 = self._fig_to_base64(fig)
+            
+            if self.debug_service:
+                self.debug_service.add_step_details({
+                    "visualization_type": "line",
+                    "visualization_size": len(img_base64) if img_base64 else 0
+                })
+                self.debug_service.end_step()
+            
+            return img_base64
+        except Exception as e:
+            logger.error(f"Error creating line chart: {str(e)}")
+            if self.debug_service:
+                self.debug_service.add_step_details({"error": str(e)})
+                self.debug_service.end_step(error=e)
+            return None
+    
+    def create_default_visualization(self, data: List[Dict[str, Any]], query_text: str = "Query results") -> Optional[str]:
+        """Create a default visualization based on the data"""
+        try:
+            if self.debug_service:
+                self.debug_service.start_step("default_visualization_creation", {
+                    "data_rows": len(data),
+                    "query_text": query_text
+                })
+            
+            # Convert data to DataFrame
+            df = self._convert_to_dataframe(data)
+            
+            # Determine best visualization type
+            viz_type = self._determine_visualization_type(df, query_text)
+            
+            # Create appropriate visualization
+            if viz_type == "bar":
+                fig = self._create_bar_chart(df, query_text)
+            elif viz_type == "line":
+                fig = self._create_line_chart(df, query_text)
+            elif viz_type == "pie":
+                fig = self._create_pie_chart(df, query_text)
+            elif viz_type == "geo":
+                fig = self._create_geo_chart(df, query_text)
+            else:
+                fig = self._create_table(df, query_text)
+            
+            # Convert to base64
+            img_base64 = self._fig_to_base64(fig)
+            
+            if self.debug_service:
+                self.debug_service.add_step_details({
+                    "visualization_type": viz_type,
+                    "visualization_size": len(img_base64) if img_base64 else 0
+                })
+                self.debug_service.end_step()
+            
+            return img_base64
+        except Exception as e:
+            logger.error(f"Error creating default visualization: {str(e)}")
+            if self.debug_service:
+                self.debug_service.add_step_details({"error": str(e)})
+                self.debug_service.end_step(error=e)
+            return None
+            
+    def create_geo_chart(self, data: List[Dict[str, Any]], query_text: str = "Geographic data") -> Optional[str]:
+        """Create a geographic visualization from the given data"""
+        try:
+            if self.debug_service:
+                self.debug_service.start_step("geo_chart_creation", {
+                    "data_rows": len(data),
+                    "query_text": query_text
+                })
+            
+            # Convert data to DataFrame
+            df = self._convert_to_dataframe(data)
+            
+            # Create geo chart
+            fig = self._create_geo_chart(df, query_text)
+            
+            # Convert to base64
+            img_base64 = self._fig_to_base64(fig)
+            
+            if self.debug_service:
+                self.debug_service.add_step_details({
+                    "visualization_type": "geo",
+                    "visualization_size": len(img_base64) if img_base64 else 0
+                })
+                self.debug_service.end_step()
+            
+            return img_base64
+        except Exception as e:
+            logger.error(f"Error creating geo chart: {str(e)}")
+            if self.debug_service:
+                self.debug_service.add_step_details({"error": str(e)})
+                self.debug_service.end_step(error=e)
+            return None 

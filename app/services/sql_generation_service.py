@@ -26,7 +26,11 @@ Your goal is to generate a syntactically correct PostgreSQL query to answer the 
 4.  **Handle JSONB Columns (Other):** Other columns might be JSONB (like `demographics`, `dwell_time`). For these, use standard PostgreSQL JSONB operators (`->>`, `->`, etc.) based on the schema description if you need to access nested data.
 5.  **Use Context:** Refer to the 'DW CONTEXT' section for available regions, date ranges, and descriptions of key metrics to help formulate correct filters and joins.
 6.  **Join Appropriately:** Join tables within the `dw` schema when necessary (e.g., `dw.fact_visitor f` with `dw.dim_date d`). If you need to join with a table known to be outside the `dw` schema (like `data_lake.aoi_days_raw`, if applicable based on context), use the fully qualified name.
-7.  **Date Filtering:** Use the `dw.dim_date` table for filtering by year, month, day, season, etc. Example: `JOIN dw.dim_date d ON f.date_id = d.date_id WHERE d.year = 2023 AND d.month BETWEEN 3 AND 5` for Spring 2023. The `season` column in `dw.dim_date` can also be used (e.g., `WHERE d.season = 'Spring'`).
+7.  **Date Filtering and Operations:** 
+    - Use the `dw.dim_date` table for filtering by year, month, day, season, etc. 
+    - Example: `JOIN dw.dim_date d ON f.date_id = d.date_id WHERE d.year = 2023 AND d.month BETWEEN 3 AND 5` for Spring 2023.
+    - The `season` column in `dw.dim_date` can also be used (e.g., `WHERE d.season = 'Spring'`).
+    - The date column is named `full_date` (not `date`). Use this column for date operations: `DATE_TRUNC('week', d.full_date)`.
 8.  **Aggregation:** Use appropriate aggregate functions (SUM, AVG, COUNT, MAX, MIN).
 9.  **Clarity:** Alias tables (e.g., `FROM dw.fact_visitor f JOIN dw.dim_date d ON ...`) for readability.
 10. **Efficiency:** Only select the necessary columns. If asking for a total or count, don't select individual rows unless needed.
@@ -44,29 +48,27 @@ class SQLGenerationService:
         self.debug_service = debug_service
         logger.info("SQLGenerationService initialized successfully")
     
-    async def generate_query(self, query_text: str, schema_context: Dict[str, Any]) -> str:
-        """Generate SQL query using LLM based on natural language query and combined schema context."""
+    async def generate_query(self, user_question: str, live_schema_string: str, dw_context: Dict[str, Any]) -> str:
+        """Generate SQL query using LLM based on natural language query and database context."""
         if self.debug_service:
             self.debug_service.start_step("sql_generation_llm", {
-                "query_text": query_text,
-                "schema_context_keys": list(schema_context.keys())
+                "query_text": user_question,
+                "schema_context_provided": bool(live_schema_string),
+                "dw_context_provided": bool(dw_context)
             })
         
         sql_query = ""
         try:
-            live_schema = schema_context.get("live_schema_string", "")
-            dw_context_info = schema_context.get("dw_context", {})
-
-            if not live_schema:
+            if not live_schema_string:
                 raise ValueError("Live schema context is missing or empty.")
 
             # Prepare the context string for the prompt
-            context_for_prompt = f"\n--- LIVE SCHEMA (dw) ---\n{live_schema}\n"
-            context_for_prompt += f"\n--- DW CONTEXT ---\n{json.dumps(dw_context_info, indent=2)}\n"
+            context_for_prompt = f"\n--- LIVE SCHEMA (dw) ---\n{live_schema_string}\n"
+            context_for_prompt += f"\n--- DW CONTEXT ---\n{json.dumps(dw_context, indent=2)}\n"
 
             # Prepare messages for the LLM (Now formatting as a single string)
             # Combine system prompt, context, and user question into a single prompt string
-            full_prompt_string = f"{SQL_GENERATION_SYSTEM_PROMPT}\n\n{context_for_prompt}\n\nUser Question: {query_text}\n\nGenerate the PostgreSQL query:"
+            full_prompt_string = f"{SQL_GENERATION_SYSTEM_PROMPT}\n\n{context_for_prompt}\n\nUser Question: {user_question}\n\nGenerate the PostgreSQL query:"
 
             # Call the LLM adapter using agenerate_text
             # Assuming llm_adapter has a method like 'agenerate_text'

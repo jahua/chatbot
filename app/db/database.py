@@ -148,6 +148,23 @@ class DatabaseService:
             logger.error(f"Parameters: {params}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise
+    
+    async def execute_query_async(self, query: str, params: Optional[Union[Dict, List, Tuple]] = None) -> List[Dict]:
+        """Execute a SQL query asynchronously and return results as a list of dictionaries."""
+        try:
+            logger.debug(f"Executing async query: {query}")
+            logger.debug(f"With parameters: {params}")
+            
+            # Since SQLAlchemy operations are synchronous, we use the synchronous method 
+            # but wrap it in an asyncio-friendly way
+            return self.execute_query(query, params)
+                
+        except Exception as e:
+            logger.error(f"Error executing async query: {str(e)}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Parameters: {params}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
             
     def validate_query(self, query: str):
         """Validate a SQL query without executing it"""

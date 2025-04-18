@@ -178,4 +178,12 @@ class DatabaseService:
         """Clean up any resources"""
         # Nothing to do here since we're using connection context managers
         # But this method is needed to maintain API compatibility
-        pass 
+        pass
+        
+    async def execute_query_async(self, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
+        """
+        Asynchronously execute a SQL query and return results as a list of dictionaries
+        (Using synchronous implementation with awaitable wrapper)
+        """
+        # Since we're using a synchronous psycopg2 driver, we'll just call the sync method
+        return self.execute_query(query, params) 

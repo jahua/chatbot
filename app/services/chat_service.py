@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional, List, AsyncGenerator
+from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple
 from sqlalchemy.orm import Session
 from ..db.database import SessionLocal, DatabaseService, get_db
 from ..llm.openai_adapter import OpenAIAdapter
@@ -54,17 +54,23 @@ logger = logging.getLogger(__name__)
 class ChatService:
     def __init__(
         self,
-        schema_service: SchemaService,
-        dw_context_service: DWContextService,
+        schema_service: Optional[SchemaService] = None,
+        dw_context_service: Optional[DWContextService] = None,
         llm_adapter: Optional[OpenAIAdapter] = None
     ):
         """Initialize ChatService with required dependencies"""
-        self.schema_service = schema_service
+        self.schema_service = schema_service or SchemaService()
         self.dw_context_service = dw_context_service
         self.llm_adapter = llm_adapter
         
         # Initialize debug service
         self.debug_service = DebugService()
+        
+        # Initialize DatabaseService (no params needed)
+        self.db_service = DatabaseService()
+        
+        # Initialize SQL formatter
+        self.sql_formatter = None
         
         # Initialize modular services for LangChain-style flow
         self.sql_generation_service = SQLGenerationService(llm_adapter=self.llm_adapter, debug_service=self.debug_service)
@@ -72,11 +78,6 @@ class ChatService:
         
         # Initialize other supporting services
         self.tourism_region_service = TourismRegionService()
-        
-        # Create DatabaseService for GeoInsightsService
-        self.db_service = DatabaseService()
-        self.geo_insights_service = GeoInsightsService(db_service=self.db_service)
-        self.dw_analytics_agent = DWAnalyticsAgent()
         
         # Set up cache for query results
         self.query_cache = {}
@@ -87,19 +88,27 @@ class ChatService:
     async def process_chat_stream(
         self,
         message: str,
-        *,
         session_id: str,
-        is_direct_query: bool,
+        is_direct_query: bool = False,
         message_id: Optional[str] = None,
-        dw_db: Session
+        dw_db: Session = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Process a chat message and return a streaming response.
+        """
         flow_succeeded = True # Overall success flag
         current_step_name = None
-        current_message_id = message_id or str(uuid.uuid4())
-        self.debug_service.start_flow(session_id, current_message_id)
+        
+        # Use provided message_id or generate a new one
+        if message_id is None:
+            message_id = self.debug_service.start_flow(session_id)
+        else:
+            # Register the message ID with debug service
+            self.debug_service.start_flow(session_id, message_id=message_id)
+        
         yield {"type": "start"}
-        yield {"type": "message_id", "message_id": current_message_id}
-        yield {"type": "content_start", "message_id": current_message_id}
+        yield {"type": "message_id", "message_id": message_id}
+        yield {"type": "content_start", "message_id": message_id}
         yield {"type": "content", "content": "Analyzing your question..."}
 
         processed_results = [] # Initialize to ensure it exists
@@ -109,44 +118,32 @@ class ChatService:
             # --- Step: Message Processing ---
             current_step_name = "message_processing"
             self.debug_service.start_step(current_step_name)
-            query_type = None # Initialize
             try:
                 query_type = self._determine_query_type(message, is_direct_query)
-                logger.info(f"Determined query type: {query_type}") # ADDED LOG
-                self.debug_service.add_step_details({
+                self.debug_service.update_step(current_step_name, details={
                     "message": message,
                     "is_direct_query_flag": is_direct_query,
                     "query_type": query_type
                 })
-                self.debug_service.end_step()
+                self.debug_service.end_step(current_step_name, success=True)
             except Exception as step_e:
-                logger.error("Error in _determine_query_type", exc_info=True) # ADDED LOG
-                self.debug_service.end_step(error=str(step_e))
+                self.debug_service.end_step(current_step_name, success=False, error=str(step_e))
                 raise # Re-raise to be caught by outer try/except
 
             # --- Step: Context Retrieval ---
             current_step_name = "context_retrieval"
             self.debug_service.start_step(current_step_name)
-            schema_context, dw_context = None, None # Initialize
             try:
-                schema_context, dw_context = await self._get_context(
-                    message, 
-                    query_type == "natural_language", 
-                    dw_db=dw_db
-                )
-                logger.info(f"Context retrieval complete. Schema context length: {len(schema_context) if schema_context else 0}") # ADDED LOG
-                self.debug_service.add_step_details({
+                schema_context, dw_context = await self._get_context(message, query_type == "natural_language", dw_db)
+                self.debug_service.end_step(current_step_name, success=True, details={
                     "schema_context_retrieved": schema_context is not None,
                     "schema_length": len(schema_context) if schema_context else 0,
                     "dw_context_keys": list(dw_context.keys()) if dw_context else []
                 })
-                self.debug_service.end_step()
             except Exception as step_e:
-                logger.error("Error in _get_context", exc_info=True) # ADDED LOG
-                self.debug_service.end_step(error=str(step_e))
+                self.debug_service.end_step(current_step_name, success=False, error=str(step_e))
                 raise
 
-            logger.info("Proceeding to main logic branching...") # ADDED LOG
             # --- Main Logic Branching ---
             if query_type == "sql_direct":
                 # --- Step: SQL Direct Execution ---
@@ -155,12 +152,12 @@ class ChatService:
                 try:
                     sql_query = message # Direct query is the message itself
                     yield {"type": "sql_query", "sql_query": sql_query}
-                    result = dw_db.execute(text(sql_query))
+                    result = await self.db_service.execute_query_async(sql_query)
                     processed_results = self._process_sql_results(result)
-                    self.debug_service.add_step_details({"executed_successfully": True, "results_processed": True, "row_count": len(processed_results)})
-                    self.debug_service.end_step()
+                    self.debug_service.update_step(current_step_name, details={"executed_successfully": True, "results_processed": True, "row_count": len(processed_results)})
+                    self.debug_service.end_step(current_step_name, success=True)
                 except Exception as step_e:
-                    self.debug_service.end_step(error=str(step_e))
+                    self.debug_service.end_step(current_step_name, success=False, error=str(step_e))
                     raise
 
                 # --- Step: Response Generation (Direct) ---
@@ -174,14 +171,14 @@ class ChatService:
                     visualization = self._get_visualization(processed_results, sql_query)
                     if visualization:
                         yield {"type": "visualization", "visualization": visualization}
-                        self.debug_service.add_step_details({"visualization_generated": True})
+                        self.debug_service.update_step(current_step_name, details={"visualization_generated": True})
                     else:
-                         self.debug_service.add_step_details({"visualization_skipped": True})
-                    self.debug_service.end_step()
+                        self.debug_service.update_step(current_step_name, details={"visualization_skipped": True})
+                    self.debug_service.end_step(current_step_name, success=True)
                 except Exception as step_e:
                     # Log visualization error but don't fail the flow for direct SQL
                     logger.warning(f"Visualization failed for direct query, but continuing: {str(step_e)}")
-                    self.debug_service.end_step(error=f"Handled viz error: {str(step_e)}")
+                    self.debug_service.end_step(current_step_name, success=False, error=f"Handled viz error: {str(step_e)}")
 
 
             elif query_type == "natural_language":
@@ -193,18 +190,16 @@ class ChatService:
                 })
                 try:
                     sql_query = await self.sql_generation_service.generate_query(
-                        query_text=message,
-                        schema_context={
-                            "live_schema_string": schema_context,
-                            "dw_context": dw_context
-                        }
+                        user_question=message,
+                        live_schema_string=schema_context,
+                        dw_context=dw_context
                     )
                     if not sql_query: raise ValueError("SQL query generation by LLM returned empty.")
                     yield {"type": "sql_query", "sql_query": sql_query}
-                    self.debug_service.add_step_details({"sql_generated": True, "sql_query": sql_query})
-                    self.debug_service.end_step()
+                    self.debug_service.update_step(current_step_name, details={"sql_generated": True, "sql_query": sql_query})
+                    self.debug_service.end_step(current_step_name, success=True)
                 except Exception as step_e:
-                    self.debug_service.end_step(error=str(step_e))
+                    self.debug_service.end_step(current_step_name, success=False, error=str(step_e))
                     raise
 
                 # --- Step: SQL Execution ---
@@ -212,14 +207,14 @@ class ChatService:
                 self.debug_service.start_step(current_step_name)
                 try:
                     logger.info(f"Executing SQL query: {sql_query}")
-                    formatted_sql = format_sql(sql_query)
-                    result = dw_db.execute(text(formatted_sql))
+                    formatted_sql = format_sql(sql_query) if self.sql_formatter is None else self.sql_formatter.format_sql(sql_query)
+                    result = await self.db_service.execute_query_async(formatted_sql)
                     processed_results = self._process_sql_results(result)
                     logger.info(f"SQL query executed. Row count: {len(processed_results)}")
-                    self.debug_service.add_step_details({"executed_successfully": True, "results_processed": True, "row_count": len(processed_results)})
-                    self.debug_service.end_step()
+                    self.debug_service.update_step(current_step_name, details={"executed_successfully": True, "results_processed": True, "row_count": len(processed_results)})
+                    self.debug_service.end_step(current_step_name, success=True)
                 except Exception as step_e:
-                    self.debug_service.end_step(error=str(step_e))
+                    self.debug_service.end_step(current_step_name, success=False, error=str(step_e))
                     raise
 
                 # --- Step: Response Generation ---
@@ -231,11 +226,11 @@ class ChatService:
                     response = f"Found {len(processed_results)} results for your query about busy periods." # Simplified
                     # TODO: Integrate real ResponseGenerationService call
                     # response = await self.response_generation_service.generate_response(...)
-                    self.debug_service.add_step_details({"response_generated": True, "response_length": len(response)})
-                    self.debug_service.end_step()
+                    self.debug_service.update_step(current_step_name, details={"response_generated": True, "response_length": len(response)})
+                    self.debug_service.end_step(current_step_name, success=True)
                 except Exception as step_e:
-                     self.debug_service.end_step(error=str(step_e))
-                     raise # Fail flow if response generation fails
+                    self.debug_service.end_step(current_step_name, success=False, error=str(step_e))
+                    raise # Fail flow if response generation fails
 
                 # --- Yield Final Content ---
                 # This block now has its own error handling and logging
@@ -244,16 +239,16 @@ class ChatService:
                 try:
                     logger.info("Attempting to yield final content chunks...") # ADDED LOG
                     if not response:
-                         logger.warning("Response string is empty, skipping final content yield.")
+                        logger.warning("Response string is empty, skipping final content yield.")
                     else:
                         for chunk in self._split_into_chunks(response):
                             yield {"type": "content", "content": chunk}
                             # logger.debug(f"Yielded content chunk: {chunk[:50]}...") # Optional: very verbose
                     logger.info("Finished yielding final content chunks.") # ADDED LOG
-                    self.debug_service.end_step()
+                    self.debug_service.end_step(yield_step_name, success=True)
                 except Exception as yield_e:
                     logger.error(f"Error yielding final content: {str(yield_e)}", exc_info=True)
-                    self.debug_service.end_step(error=str(yield_e))
+                    self.debug_service.end_step(yield_step_name, success=False, error=str(yield_e))
                     # Continue the flow, but log the yield error. Don't set flow_succeeded = False here.
 
 
@@ -267,17 +262,17 @@ class ChatService:
                     visualization = self._get_visualization(processed_results, sql_query)
                     if visualization:
                         yield {"type": "visualization", "visualization": visualization}
-                        self.debug_service.add_step_details({"visualization_generated": True})
+                        self.debug_service.update_step(current_step_name, details={"visualization_generated": True}) # Removed type/size for simplicity
                     else:
-                         self.debug_service.add_step_details({"visualization_skipped": True})
-                    self.debug_service.end_step()
+                        self.debug_service.update_step(current_step_name, details={"visualization_skipped": True})
+                    self.debug_service.end_step(current_step_name, success=True)
                 except Exception as step_e:
-                     logger.warning(f"Visualization creation/yielding failed, but continuing: {str(step_e)}")
-                     self.debug_service.end_step(error=f"Handled viz error: {str(step_e)}")
-                     # Do not raise, allow flow to finish
+                    logger.warning(f"Visualization creation/yielding failed, but continuing: {str(step_e)}")
+                    self.debug_service.end_step(current_step_name, success=False, error=f"Handled viz error: {str(step_e)}")
+                    # Do not raise, allow flow to finish
 
             else: # Fallback for other query types
-                 yield {"type": "content", "content": "Sorry, I can only process natural language queries or direct SQL for now."}
+                yield {"type": "content", "content": "Sorry, I can only process natural language queries or direct SQL for now."}
 
 
         except Exception as e:
@@ -290,20 +285,11 @@ class ChatService:
 
         finally:
             # Final debug info yield
-            try:
-                debug_info_data = self.debug_service.get_debug_info_for_response()
-            except Exception as debug_err:
-                logger.error(f"Error generating final debug info: {debug_err}", exc_info=True)
-                debug_info_data = {"status": "error", "error": "Failed to generate debug info"}
-            
+            debug_info_data = self.debug_service.end_flow(success=flow_succeeded)
             yield {"type": "debug_info", "debug_info": debug_info_data}
-            
             # Final end marker
-            # Ensure message ID is available
-            final_message_id = self.debug_service.get_message_id() or "unknown"
-            yield {"type": "end", "message_id": final_message_id}
-            
-            logger.info(f"Finished processing chat stream for session {session_id}. Overall Success: {flow_succeeded}")
+            yield {"type": "end", "message_id": message_id}
+            logger.info(f"Finished processing chat stream for session {session_id}. Success: {flow_succeeded}")
 
     def is_conversational_message(self, message: str) -> bool:
         """Detect if a message is conversational rather than a data query"""
@@ -409,107 +395,206 @@ class ChatService:
             yield text[i:i + chunk_size]
             
     def close(self):
-        """Clean up resources when service is shutting down"""
+        """Close any open resources"""
+        # Log the closing operation
         logger.info("Closing ChatService resources")
-        # Close any resources that need to be cleaned up
-        try:
-            # Clean up any resources that need to be released
-            # For example, if there are any background tasks or connections to close
-            pass
-        except Exception as e:
-            logger.error(f"Error closing ChatService: {str(e)}")
-            logger.error(traceback.format_exc())
+        
+        # Close any other resources that need closing
+        if hasattr(self, 'db_service'):
+            self.db_service.close()
+        
+        logger.info("ChatService resources closed successfully")
 
-    def _process_sql_results(self, result: Result) -> List[Dict[str, Any]]:
-        """Convert SQLAlchemy Result to a list of JSON-serializable dictionaries."""
+    def _process_sql_results(self, result: Any) -> List[Dict[str, Any]]:
+        """Convert database query results to a list of JSON-serializable dictionaries.
+        Handles both SQLAlchemy Result objects and lists of dictionaries."""
         processed_results = []
         if not result:
             return processed_results
             
         try:
-            keys = result.keys()
-            for row in result.mappings(): # Iterate through rows as dictionaries
-                row_dict = {}
-                for key in keys:
-                    value = row[key]
-                    if isinstance(value, (datetime.date, datetime.datetime)):
-                        row_dict[key] = value.isoformat()
-                    elif isinstance(value, decimal.Decimal):
-                        row_dict[key] = float(value)
-                    # Add other type conversions if needed (e.g., timedelta)
-                    else:
-                        row_dict[key] = value
-                processed_results.append(row_dict)
+            # If result is already a list of dictionaries (from services.database_service)
+            if isinstance(result, list):
+                if not result:
+                    return []
+                    
+                # If items in the list are already dictionaries, just process their values
+                if isinstance(result[0], dict):
+                    for row in result:
+                        row_dict = {}
+                        for key, value in row.items():
+                            if isinstance(value, (datetime.date, datetime.datetime)):
+                                row_dict[key] = value.isoformat()
+                            elif isinstance(value, decimal.Decimal):
+                                row_dict[key] = float(value)
+                            else:
+                                row_dict[key] = value
+                        processed_results.append(row_dict)
+                    return processed_results
+            
+            # If result is a SQLAlchemy Result object (from db.database)
+            if hasattr(result, 'keys'):
+                keys = result.keys()
+                for row in result.mappings():  # Iterate through rows as dictionaries
+                    row_dict = {}
+                    for key in keys:
+                        value = row[key]
+                        if isinstance(value, (datetime.date, datetime.datetime)):
+                            row_dict[key] = value.isoformat()
+                        elif isinstance(value, decimal.Decimal):
+                            row_dict[key] = float(value)
+                        else:
+                            row_dict[key] = value
+                    processed_results.append(row_dict)
+                return processed_results
+                
+            # If we got here, we don't know how to process this result format
+            logger.warning(f"Unknown result format: {type(result)}. Returning empty list.")
+            return []
+            
         except Exception as e:
-             logger.error(f"Error processing SQL results: {str(e)}", exc_info=True)
-             # Decide how to handle partial processing or return empty
-             return [] # Return empty list on processing error
+            logger.error(f"Error processing SQL results: {str(e)}", exc_info=True)
+            # Decide how to handle partial processing or return empty
+            return []  # Return empty list on processing error
              
         return processed_results
 
-    def _get_visualization(self, results: List[Dict[str, Any]], query: str) -> Optional[str]:
+    def _get_visualization(self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
         """Generate visualization based on query results, handling potential errors."""
-        visualization_data = None # Initialize
+        visualization_data = None
+        vis_type = "none"
+        
         try:
-            if results and self.visualization_service:
-                # Example: Generate a bar chart for visitor data
-                if "visitor" in query.lower() or "tourist" in query.lower():
-                    try:
-                        visualization_data = self.visualization_service.create_bar_chart(results)
-                    except AttributeError:
-                        logger.warning("VisualizationService has no 'create_bar_chart' method.")
-                    except Exception as viz_err:
-                         logger.error(f"Error in create_bar_chart: {str(viz_err)}")
-                # Add similar try/except blocks for other chart types if needed
-                elif "spending" in query.lower() or "industry" in query.lower():
-                     try:
-                         visualization_data = self.visualization_service.create_pie_chart(results)
-                     except AttributeError:
-                         logger.warning("VisualizationService has no 'create_pie_chart' method.")
-                     except Exception as viz_err:
-                         logger.error(f"Error in create_pie_chart: {str(viz_err)}")
-                # ... add more specific chart types with try/except ...
-                else:
-                    # Fallback to a default or attempt a generic visualization
-                    try:
-                        # Example: Try a generic table or default plot if available
-                        if hasattr(self.visualization_service, 'create_default_visualization'):
-                            visualization_data = self.visualization_service.create_default_visualization(results)
-                        else:
-                            logger.warning("No default visualization method found.")
-                    except Exception as viz_err:
-                        logger.error(f"Error in default visualization: {str(viz_err)}")
-            else:
+            if not results or not self.visualization_service:
                 logger.info("No results or visualization service available to generate visualization.")
+                return None
+
+            query_lower = query.lower()
             
+            # Check for time-related queries for line charts
+            if any(term in query_lower for term in ["trend", "over time", "by week", "by month", "by year"]):
+                logger.info("Attempting to create line chart for time-series data")
+                try:
+                    visualization_data = self.visualization_service.create_line_chart(results, query)
+                    vis_type = "image"
+                except Exception as viz_err:
+                    logger.error(f"Error in create_line_chart: {str(viz_err)}")
+            
+            # Check for visitor/tourism related queries for bar charts
+            elif any(term in query_lower for term in ["visitor", "tourist", "busiest", "traffic"]):
+                logger.info("Attempting to create bar chart for visitor data")
+                try:
+                    visualization_data = self.visualization_service.create_bar_chart(results, query)
+                    vis_type = "image"
+                except Exception as viz_err:
+                    logger.error(f"Error in create_bar_chart: {str(viz_err)}")
+            
+            # Check for spending/revenue/distribution queries for pie charts
+            elif any(term in query_lower for term in ["spending", "revenue", "share", "distribution", "breakdown", "percent", "industry"]):
+                logger.info("Attempting to create pie chart for spending/distribution data")
+                try:
+                    visualization_data = self.visualization_service.create_pie_chart(results, query)
+                    vis_type = "image"
+                except Exception as viz_err:
+                    logger.error(f"Error in create_pie_chart: {str(viz_err)}")
+            
+            # Check for region/geographic queries
+            elif any(term in query_lower for term in ["region", "location", "area", "geography", "map", "spatial"]):
+                logger.info("Attempting to create geo chart for region data")
+                try:
+                    visualization_data = self.visualization_service.create_geo_chart(results, query)
+                    vis_type = "image"
+                except Exception as viz_err:
+                    logger.error(f"Error in create_geo_chart: {str(viz_err)}")
+            
+            # If no specific chart type was successful or applicable, try the default visualization
+            if visualization_data is None:
+                logger.info("Attempting to create default visualization")
+                try:
+                    visualization_data = self.visualization_service.create_default_visualization(results, query)
+                    vis_type = "image"
+                except Exception as viz_err:
+                    logger.error(f"Error in default visualization: {str(viz_err)}")
+                    
+                    # If visualization fails, use table as fallback
+                    if results:
+                        logger.info("Falling back to table visualization")
+                        vis_type = "table"
+                        visualization_data = results
+            
+            # Format the visualization output according to the frontend's expectations
+            if visualization_data is not None:
+                if vis_type == "image":
+                    return {
+                        "type": "image",
+                        "data": visualization_data  # Base64 string
+                    }
+                elif vis_type == "table":
+                    return {
+                        "type": "table",
+                        "data": visualization_data  # List of dictionaries
+                    }
+                    
         except Exception as e:
             logger.error(f"Unexpected error during visualization generation: {str(e)}")
-            logger.error(traceback.format_exc()) # Log the full traceback
-
-        return visualization_data # Return None if any error occurred or no data
-
-    async def _get_context(
-        self, 
-        query: str, 
-        is_nlq: bool, 
-        dw_db: Session
-    ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
-        if not is_nlq:
-            return None, None 
-
-        # SchemaService doesn't expect a db_session parameter
-        schema_context_str = await self.schema_service.get_schema_context() 
-
-        # Assume DWContextService needs the session
-        # Re-initialize or pass db session if needed
-        # Option 1: Pass session (if service accepts it)
-        # dw_context = await self.dw_context_service.get_dw_context(query=query, db_session=dw_db)
-        # Option 2: Re-initialize with new session (if service takes db in init)
-        dw_context_service = DWContextService(dw_db=dw_db)
-        dw_context = await dw_context_service.get_dw_context(query=query)
-
-        logger.info(f"Retrieved DW context: {list(dw_context.keys())}")
-        return schema_context_str, dw_context
+            logger.error(traceback.format_exc())
+            
+            # Recovery attempts for visualization errors
+            return self._attempt_recovery_visualization(results, query)
+        
+        return None
+        
+    def _attempt_recovery_visualization(self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
+        """Attempt to recover from visualization errors with fallback options."""
+        if not results or not self.visualization_service:
+            logger.info("No results or visualization service available for recovery")
+            return None
+            
+        # Try bar chart for visitor data
+        if "visitor" in query.lower() or "tourist" in query.lower():
+            try:
+                visualization_data = self.visualization_service.create_bar_chart(results)
+                if visualization_data:
+                    return {
+                        "type": "image",
+                        "data": visualization_data
+                    }
+            except Exception as viz_err:
+                logger.error(f"Recovery bar chart failed: {str(viz_err)}")
+        
+        # Try pie chart for spending/industry data
+        elif "spending" in query.lower() or "industry" in query.lower():
+            try:
+                visualization_data = self.visualization_service.create_pie_chart(results)
+                if visualization_data:
+                    return {
+                        "type": "image",
+                        "data": visualization_data
+                    }
+            except Exception as viz_err:
+                logger.error(f"Recovery pie chart failed: {str(viz_err)}")
+        
+        # Final fallback - default visualization
+        else:
+            try:
+                if hasattr(self.visualization_service, 'create_default_visualization'):
+                    visualization_data = self.visualization_service.create_default_visualization(results)
+                    if visualization_data:
+                        return {
+                            "type": "image",
+                            "data": visualization_data
+                        }
+            except Exception as viz_err:
+                logger.error(f"Recovery default visualization failed: {str(viz_err)}")
+        
+        # If all else fails, return a table
+        if results:
+            return {
+                "type": "table",
+                "data": results
+            }
+            
+        return None
 
     def _determine_query_type(self, message: str, is_direct_query: bool) -> str:
         """Determine the type of query based on the message and the direct_query flag."""
@@ -526,3 +611,138 @@ class ChatService:
         
         # Otherwise, treat it as a natural language query
         return "natural_language"
+
+    async def _get_context(self, message: str, is_natural_language: bool = True, dw_db: Session = None) -> Tuple[Optional[str], Optional[str]]:
+        """Retrieve database schema context and data warehouse insights context"""
+        schema_context = None
+        dw_context = None
+        
+        try:
+            # Get schema context from SchemaService
+            try:
+                logger.info("Fetching schema context from SchemaService")
+                schema_context = await self.schema_service.get_schema_context(dw_db)
+                if not schema_context:
+                    logger.warning("Schema context is empty, using fallback schema")
+                    schema_context = self._get_fallback_schema_context()
+            except Exception as schema_e:
+                logger.error(f"Error retrieving schema context: {str(schema_e)}")
+                logger.error(traceback.format_exc())
+                # Use fallback schema instead of returning None
+                schema_context = self._get_fallback_schema_context()
+            
+            # Get data warehouse context from DWContextService
+            try:
+                logger.info("Fetching DW context from DWContextService")
+                
+                # Create a temporary DWContextService instance with the current db session if not provided
+                if self.dw_context_service is None:
+                    temp_dw_context_service = DWContextService(dw_db)
+                    dw_context = await temp_dw_context_service.get_dw_context(message)
+                else:
+                    # If we have a service instance but need to use a different session
+                    # We'll create a temporary one with the current session
+                    if hasattr(self.dw_context_service, 'dw_db') and self.dw_context_service.dw_db != dw_db:
+                        temp_dw_context_service = DWContextService(dw_db)
+                        dw_context = await temp_dw_context_service.get_dw_context(message)
+                    else:
+                        dw_context = await self.dw_context_service.get_dw_context(message)
+                
+                if not dw_context:
+                    logger.warning("DW context is empty, using fallback context")
+                    dw_context = self._get_fallback_dw_context()
+            except Exception as dw_e:
+                logger.error(f"Error retrieving DW context: {str(dw_e)}")
+                logger.error(traceback.format_exc())
+                # Use fallback DW context
+                dw_context = self._get_fallback_dw_context()
+            
+            return schema_context, dw_context
+        except Exception as e:
+            logger.error(f"General error in _get_context: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Ensure we return at least the fallback values rather than None
+            if not schema_context:
+                schema_context = self._get_fallback_schema_context()
+            if not dw_context:
+                dw_context = self._get_fallback_dw_context()
+            return schema_context, dw_context
+    
+    def _get_fallback_schema_context(self) -> str:
+        """Provide a minimal fallback schema context when the actual schema can't be retrieved"""
+        logger.info("Using fallback schema context")
+        return """
+        Table: dw.fact_visitor
+        Columns:
+          - date_id (int): Foreign key to dw.dim_date
+          - region_id (int): Foreign key to dw.dim_region
+          - swiss_tourists (int): Number of Swiss tourists
+          - foreign_tourists (int): Number of foreign tourists
+          - swiss_locals (int): Number of Swiss locals
+          - foreign_workers (int): Number of foreign workers 
+          - swiss_commuters (int): Number of Swiss commuters
+          - total_visitors (int): Total number of visitors
+        
+        Table: dw.fact_spending
+        Columns:
+          - date_id (int): Foreign key to dw.dim_date
+          - region_id (int): Foreign key to dw.dim_region
+          - industry_id (int): Foreign key to dw.dim_industry
+          - amount (numeric): Total spending amount
+          - transaction_count (int): Number of transactions
+        
+        Table: dw.dim_date
+        Columns:
+          - date_id (int): Primary key
+          - date (date): Actual date
+          - day (int): Day of month
+          - month (int): Month number
+          - year (int): Year
+          - day_of_week (int): Day of week (0-6)
+          - is_weekend (boolean): Whether the date is a weekend
+          - quarter (int): Quarter (1-4)
+          - season (text): Season name (Spring, Summer, Fall, Winter)
+        
+        Table: dw.dim_region
+        Columns:
+          - region_id (int): Primary key
+          - region_name (text): Name of the region
+          - canton (text): Canton name
+          - is_urban (boolean): Whether the region is urban
+        
+        Table: dw.dim_industry
+        Columns:
+          - industry_id (int): Primary key
+          - industry_name (text): Name of the industry
+          - category (text): Industry category
+        """
+    
+    def _get_fallback_dw_context(self) -> Dict[str, Any]:
+        """Provide fallback DW context when the actual context can't be retrieved"""
+        logger.info("Using fallback DW context")
+        return {
+            "regions": ["Zurich", "Geneva", "Basel", "Bern", "Lucerne"],
+            "date_range": {
+                "min_date": "2023-01-01",
+                "max_date": "2023-12-31"
+            },
+            "industries": ["Retail", "Accommodation", "Food Service", "Transportation"],
+            "common_metrics": {
+                "visitor_count": "Total visitor count across all categories",
+                "spending_amount": "Total spending in CHF",
+                "transaction_count": "Number of transactions"
+            }
+        }
+
+    async def _determine_query_intent(self, message: str) -> str:
+        """Determine the intent of a query."""
+        # Simple implementation for now - can be enhanced with more sophisticated intent detection
+        return "data_query"
+
+    def _get_geo_insights_service(self, dw_db: Session) -> GeoInsightsService:
+        """Get or create a GeoInsightsService with the provided database session"""
+        return GeoInsightsService(dw_db)
+    
+    def _get_dw_analytics_agent(self, dw_db: Session) -> DWAnalyticsAgent:
+        """Get or create a DWAnalyticsAgent with the provided database session"""
+        return DWAnalyticsAgent(dw_db)

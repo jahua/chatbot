@@ -65,7 +65,7 @@ async def startup_event():
     try:
         logger.info("Starting up chat service...")
         
-        # Get database session
+        # Get database session for initialization
         dw_db = next(get_dw_db())
         logger.info("Database session created")
         
@@ -81,7 +81,7 @@ async def startup_event():
         llm_adapter = OpenAIAdapter()
         logger.info("OpenAI adapter initialized")
         
-        # Initialize chat service
+        # Initialize chat service with the updated constructor signature
         chat_service = ChatService(
             schema_service=schema_service,
             dw_context_service=dw_context_service,
@@ -206,7 +206,8 @@ async def stream_chat(
                         message_id = chunk["message_id"]
                         yield json.dumps({"type": "message_id", "message_id": message_id}) + "\n"
                         
-                    if not response_started and chunk.get("content_chunk"):
+                    # Handle content start event
+                    if "type" in chunk and chunk["type"] == "content_start":
                         yield json.dumps({"type": "content_start", "message_id": message_id}) + "\n"
                         response_started = True
                         
@@ -214,7 +215,7 @@ async def stream_chat(
                     if "content_chunk" in chunk:
                         yield json.dumps({
                             "type": "content", 
-                            "content": chunk["content_chunk"]
+                            "content": chunk["content_chunk"]  # Keep using "content" in output for frontend compatibility
                         }) + "\n"
                     
                     if "sql_query" in chunk and chunk["sql_query"]:
