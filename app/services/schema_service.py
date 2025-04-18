@@ -21,7 +21,7 @@ class SchemaService:
                 FROM 
                     information_schema.columns
                 WHERE 
-                    table_schema = 'data_lake'
+                    table_schema = 'dw'
                 ORDER BY 
                     table_name, ordinal_position;
             """))
@@ -35,9 +35,9 @@ class SchemaService:
                 schema_info[table_name].append(f"  - {row[1]}: {row[2]}")
             
             # Format schema context
-            schema_context = "Database Schema:\n\n"
+            schema_context = "Database Schema (dw):\n\n"
             for table_name, columns in schema_info.items():
-                schema_context += f"Table: data_lake.{table_name}\n"
+                schema_context += f"Table: dw.{table_name}\n"
                 schema_context += "\n".join(columns)
                 schema_context += "\n\n"
             

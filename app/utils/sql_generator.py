@@ -219,33 +219,6 @@ class SQLGenerator:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return {"error": str(e)}
     
-    def format_query(self, query: str) -> str:
-        """Format the SQL query with proper indentation and line breaks"""
-        try:
-            # Simple formatting - split on keywords and rejoin with proper spacing
-            keywords = ["SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"]
-            lines = query.split("\n")
-            formatted_lines = []
-            
-            for line in lines:
-                line = line.strip()
-                # Add proper indentation for keywords
-                for keyword in keywords:
-                    if keyword in line.upper():
-                        if keyword == "SELECT":
-                            formatted_lines.append(line)
-                        else:
-                            formatted_lines.append(f"\n{line}")
-                        break
-                else:
-                    # Indent non-keyword lines
-                    formatted_lines.append(f"    {line}")
-            
-            return "\n".join(formatted_lines)
-        except Exception as e:
-            logger.error(f"Error formatting query: {str(e)}")
-            return query  # Return original query if formatting fails
-
     def _generate_sql_components(self, parsed_intent: Dict[str, Any]) -> Dict[str, str]:
         """Generate SQL components based on parsed intent"""
         components = {}
