@@ -8,6 +8,13 @@ import base64
 from datetime import datetime, date
 import decimal
 from app.rag.debug_service import DebugService
+import json
+import numpy as np
+from ..utils.visualization import generate_visualization
+import re
+from io import BytesIO
+from PIL import Image
+from plotly.utils import PlotlyJSONEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -17,482 +24,564 @@ class VisualizationService:
         self.debug_service = debug_service
         logger.info("VisualizationService initialized successfully")
     
-    def create_visualization(self, data: List[Dict[str, Any]], query_text: str) -> Optional[str]:
-        """
-        Create appropriate visualization based on data and query
-        Returns base64 encoded image or None if visualization not possible
-        """
-        if not data or len(data) == 0:
-            logger.warning("No data available for visualization")
+    def create_visualization(self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
+        """Create visualization based on query results."""
+        if not results or not isinstance(results, list) or not results:
+            logger.warning("Cannot create visualization: empty or invalid results")
             return None
         
         try:
+            debug_step = None
             if self.debug_service:
-                self.debug_service.start_step("visualization_creation", {
-                    "data_rows": len(data),
-                    "query_text": query_text
-                })
+                debug_step = self.debug_service.start_step("visualization_creation", "Creating visualization based on query results")
             
-            # Convert data to pandas DataFrame
-            df = self._convert_to_dataframe(data)
+            # Convert results to DataFrame
+            df = pd.DataFrame(results)
             
-            # Determine the best visualization type based on data and query
-            viz_type = self._determine_visualization_type(df, query_text)
+            # Fast path for small result sets - return as a table
+            if len(df) <= 3 and len(df.columns) <= 3:
+                logger.info(f"Small result set ({len(df)} rows, {len(df.columns)} columns), returning as table")
+                if self.debug_service and debug_step:
+                    self.debug_service.end_step(debug_step, "Created table visualization for small result set")
+                return self._create_table(df, query)
             
-            # Create visualization based on type
-            if viz_type == "bar":
-                fig = self._create_bar_chart(df, query_text)
-            elif viz_type == "line":
-                fig = self._create_line_chart(df, query_text)
+            # Determine visualization type based on query and data
+            viz_type = self._determine_visualization_type(query, df)
+            logger.info(f"Selected visualization type: {viz_type}")
+            
+            # Create visualization based on determined type
+            if viz_type == "table":
+                result = self._create_table(df, query)
+            elif viz_type == "simple_line":
+                result = self._create_simple_line_chart(df, query)
+            elif viz_type == "simple_bar":
+                result = self._create_simple_bar_chart(df, query)
+            elif viz_type == "heatmap":
+                result = self._create_heatmap(df, query)
             elif viz_type == "pie":
-                fig = self._create_pie_chart(df, query_text)
+                result = self._create_pie_chart(df, query)
             elif viz_type == "geo":
-                fig = self._create_geo_chart(df, query_text)
+                result = self._create_geo_chart(df, query)
             else:
-                # Default to table if no suitable visualization
-                fig = self._create_table(df, query_text)
+                # Default to table
+                result = self._create_table(df, query)
             
-            # Convert Plotly figure to base64 image
-            img_base64 = self._fig_to_base64(fig)
+            if self.debug_service and debug_step:
+                self.debug_service.end_step(debug_step, f"Created {viz_type} visualization")
             
-            if self.debug_service:
-                self.debug_service.add_step_details({
-                    "visualization_type": viz_type,
-                    "visualization_size": len(img_base64) if img_base64 else 0
-                })
-                self.debug_service.end_step()
-            
-            return img_base64
-            
+            return result
         except Exception as e:
             logger.error(f"Error creating visualization: {str(e)}")
-            if self.debug_service:
-                self.debug_service.add_step_details({"error": str(e)})
-                self.debug_service.end_step(error=e)
-            return None
+            if self.debug_service and debug_step:
+                self.debug_service.end_step(debug_step, f"Error creating visualization: {str(e)}", error=True)
+            # Return table as fallback
+            try:
+                return self._create_table(pd.DataFrame(results), query)
+            except:
+                return self._create_fallback_visualization(results, query, str(e))
     
-    def _convert_to_dataframe(self, data: List[Dict[str, Any]]) -> pd.DataFrame:
-        """Convert list of dictionaries to pandas DataFrame with type conversion"""
-        df = pd.DataFrame(data)
+    def _determine_visualization_type(self, query: str, data: pd.DataFrame) -> str:
+        """Determine the most appropriate visualization type based on the query and data."""
         
-        # Convert types for better visualization
-        for col in df.columns:
-            # Convert datetime objects to appropriate format
-            if df[col].dtype == 'object':
-                # Check if column contains datetime objects
-                if all(isinstance(x, (datetime, date)) for x in df[col].dropna()):
-                    df[col] = pd.to_datetime(df[col])
-                # Convert decimal objects to float
-                elif all(isinstance(x, decimal.Decimal) for x in df[col].dropna()):
-                    df[col] = df[col].astype(float)
+        # Normalize query for keyword matching
+        query_lower = query.lower()
         
-        return df
-    
-    def _determine_visualization_type(self, df: pd.DataFrame, query_text: str) -> str:
-        """Determine the most appropriate visualization type based on data and query"""
-        query_lower = query_text.lower()
-        num_rows = len(df)
-        num_cols = len(df.columns)
+        # Get basic data characteristics
+        num_rows = len(data)
+        num_cols = len(data.columns)
         
-        # Check number of columns to help determine chart type
-        numeric_cols = df.select_dtypes(include=['number']).columns
-        date_cols = df.select_dtypes(include=['datetime']).columns
-        categorical_cols = df.select_dtypes(include=['object']).columns
+        # Identify numeric and date/time columns
+        numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+        date_cols = [col for col in data.columns if self._is_date_column(data[col])]
         
-        has_numeric = len(numeric_cols) > 0
-        has_dates = len(date_cols) > 0
-        has_categories = len(categorical_cols) > 0
+        # Log data characteristics for debugging
+        logger.debug(f"Data shape: {data.shape}, numeric columns: {len(numeric_cols)}, date columns: {len(date_cols)}")
         
-        # For time series data
-        if has_dates and has_numeric:
-            return "line"
+        # Check for explicit visualization requests in the query
+        if "show table" in query_lower or "as table" in query_lower or "in table" in query_lower:
+            return "table"
         
-        # For comparison between categories
-        if has_categories and has_numeric and len(df) <= 15:
-            if "compare" in query_lower or "comparison" in query_lower:
-                return "bar"
-            elif any(term in query_lower for term in ["distribution", "breakdown", "portion", "percentage"]):
-                return "pie"
-            else:
-                return "bar"
+        if any(term in query_lower for term in ["pie chart", "percentage", "proportion", "distribution"]):
+            return "pie"
         
-        # For geographic data
-        if any(col in df.columns for col in ["region", "region_name", "country", "location"]):
-            if "map" in query_lower or "geographic" in query_lower or "spatial" in query_lower:
-                return "geo"
+        if any(term in query_lower for term in ["map", "location", "geographic", "spatial", "region", "canton", "switzerland"]):
+            return "geo"
         
-        # Default to bar for most numeric/categorical combinations
-        if has_numeric and (has_categories or num_rows <= 20):
-            return "bar"
+        if any(term in query_lower for term in ["correlation", "heatmap", "heat map", "relationship between"]) and len(numeric_cols) >= 2:
+            return "heatmap"
         
-        # Default to table for complex data
+        # Check for time series/trend indicators
+        time_trend_indicators = ["trend", "over time", "evolution", "changes", "growth", "decline", 
+                                 "year", "month", "day", "weekly", "monthly", "yearly", "annual"]
+        
+        if (date_cols and any(term in query_lower for term in time_trend_indicators)) or \
+           any(col for col in data.columns if "date" in str(col).lower() or "time" in str(col).lower() or "year" in str(col).lower()):
+            return "simple_line"
+        
+        # Check for categorical comparisons
+        comparison_indicators = ["compare", "comparison", "versus", "vs", "difference", "ranking", "rank", "top", "bottom"]
+        if (len(numeric_cols) >= 1 and num_cols <= 10 and num_rows <= 20) or \
+           any(term in query_lower for term in comparison_indicators):
+            return "simple_bar"
+        
+        # Default visualization based on data characteristics
+        if num_rows <= 20 and num_cols <= 10:
+            return "table"
+        
+        if len(numeric_cols) >= 1 and len(data.columns) <= 10:
+            return "simple_bar"
+        
+        # Fallback to table for complex data
         return "table"
     
-    def _create_bar_chart(self, df: pd.DataFrame, query_text: str) -> go.Figure:
-        """Create a bar chart based on the data and query"""
-        query_lower = query_text.lower()
-        
-        # Identify the most likely columns for x and y axes
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
-        
-        # Use the first categorical column for x-axis if available
-        x_col = categorical_cols[0] if categorical_cols else df.columns[0]
-        
-        # Use the first numeric column for y-axis if available, otherwise use the second column
-        y_col = numeric_cols[0] if numeric_cols else df.columns[1] if len(df.columns) > 1 else df.columns[0]
-        
-        # Determine if highlighting is needed
-        highlight = False
-        highlight_col = None
-        
-        if "busiest" in query_lower or "highest" in query_lower or "top" in query_lower:
-            highlight = True
-            highlight_col = "is_highlighted"
-            df[highlight_col] = False
-            if not df.empty:
-                max_idx = df[y_col].idxmax()
-                df.loc[max_idx, highlight_col] = True
-        
-        # Create title based on query
-        title = self._generate_title(query_text, x_col, y_col)
-        
-        # Create the chart
-        if highlight and highlight_col in df.columns:
-            colors = ['rgba(0, 123, 255, 0.8)' if row[highlight_col] else 'rgba(0, 123, 255, 0.3)' 
-                     for _, row in df.iterrows()]
-            fig = px.bar(df, x=x_col, y=y_col, title=title)
-            fig.update_traces(marker_color=colors)
-        else:
-            fig = px.bar(df, x=x_col, y=y_col, title=title)
-        
-        # Format axis labels
-        fig.update_layout(
-            xaxis_title=x_col.replace('_', ' ').title(),
-            yaxis_title=y_col.replace('_', ' ').title()
-        )
-        
-        # If x-axis has many values, angle the labels
-        if len(df[x_col].unique()) > 5:
-            fig.update_layout(xaxis_tickangle=-45)
-        
-        # Format y-axis for currency if relevant
-        if any(term in y_col.lower() for term in ["amount", "spending", "revenue", "price", "cost"]):
-            fig.update_layout(yaxis=dict(tickprefix='$', tickformat=',.0f'))
-        elif "count" in y_col.lower() or "visitors" in y_col.lower() or "total" in y_col.lower():
-            fig.update_layout(yaxis=dict(tickformat=',d'))
-        
-        return fig
-    
-    def _create_line_chart(self, df: pd.DataFrame, query_text: str) -> go.Figure:
-        """Create a line chart based on the data and query"""
-        # Identify the most likely columns for x and y axes
-        date_cols = df.select_dtypes(include=['datetime']).columns.tolist()
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        
-        # Use the first date column for x-axis if available
-        x_col = date_cols[0] if date_cols else df.columns[0]
-        
-        # Use the first numeric column for y-axis if available
-        y_col = numeric_cols[0] if numeric_cols else df.columns[1] if len(df.columns) > 1 else df.columns[0]
-        
-        # Check if we need multiple lines (by adding a color grouping)
-        color_col = None
-        for col in df.columns:
-            if col not in [x_col, y_col] and len(df[col].unique()) <= 10:
-                color_col = col
-                break
-        
-        # Create title based on query
-        title = self._generate_title(query_text, x_col, y_col)
-        
-        # Create the chart
-        if color_col:
-            fig = px.line(df, x=x_col, y=y_col, color=color_col, title=title,
-                         markers=True)
-        else:
-            fig = px.line(df, x=x_col, y=y_col, title=title,
-                         markers=True)
-        
-        # Format axis labels
-        fig.update_layout(
-            xaxis_title=x_col.replace('_', ' ').title(),
-            yaxis_title=y_col.replace('_', ' ').title()
-        )
-        
-        # Format y-axis for currency if relevant
-        if any(term in y_col.lower() for term in ["amount", "spending", "revenue", "price", "cost"]):
-            fig.update_layout(yaxis=dict(tickprefix='$', tickformat=',.0f'))
-        elif "count" in y_col.lower() or "visitors" in y_col.lower() or "total" in y_col.lower():
-            fig.update_layout(yaxis=dict(tickformat=',d'))
-        
-        return fig
-    
-    def _create_pie_chart(self, df: pd.DataFrame, query_text: str) -> go.Figure:
-        """Create a pie chart based on the data and query"""
-        # Identify the most likely columns for labels and values
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
-        
-        # Use the first categorical column for labels
-        label_col = categorical_cols[0] if categorical_cols else df.columns[0]
-        
-        # Use the first numeric column for values
-        value_col = numeric_cols[0] if numeric_cols else df.columns[1] if len(df.columns) > 1 else df.columns[0]
-        
-        # Create title based on query
-        title = self._generate_title(query_text, label_col, value_col, "Distribution")
-        
-        # Create the chart
-        fig = px.pie(df, names=label_col, values=value_col, title=title)
-        
-        # Add percentage labels
-        fig.update_traces(textposition='inside', textinfo='percent+label')
-        
-        return fig
-    
-    def _create_geo_chart(self, df: pd.DataFrame, query_text: str) -> go.Figure:
-        """Create a geographical chart based on the data and query"""
-        # This is just a placeholder - in a real implementation, 
-        # you would need to map region names to coordinates or GeoJSON files
-        
-        # For now, create a bar chart as a fallback
-        return self._create_bar_chart(df, query_text)
-    
-    def _create_table(self, df: pd.DataFrame, query_text: str) -> go.Figure:
-        """Create a table visualization for complex data"""
-        # Create a simple table using plotly
-        fig = go.Figure(data=[go.Table(
-            header=dict(
-                values=list(df.columns),
-                fill_color='paleturquoise',
-                align='left'
-            ),
-            cells=dict(
-                values=[df[col] for col in df.columns],
-                fill_color='lavender',
-                align='left'
+    def _create_time_series(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
+        """Create a time series visualization"""
+        try:
+            # Find date/time columns
+            time_cols = [col for col in df.columns if self._is_date_column(df[col])]
+            
+            if not time_cols:
+                logger.warning("No time columns found for time series")
+                return self._create_default_visualization(df, query)
+            
+            # Use the first time column as x-axis
+            x_col = time_cols[0]
+            
+            # Find numeric columns for y-axis
+            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+            numeric_cols = [col for col in numeric_cols if col != x_col]
+            
+            if not numeric_cols:
+                logger.warning("No numeric columns found for time series")
+                return self._create_default_visualization(df, query)
+            
+            # Use the first numeric column as y-axis
+            y_col = numeric_cols[0]
+            
+            # Create the plot
+            fig = px.line(df, x=x_col, y=y_col, title=f"{y_col} over {x_col}")
+            
+            # Add markers for better visibility
+            fig.update_traces(mode='lines+markers')
+            
+            # Improve layout
+            fig.update_layout(
+                margin=dict(l=20, r=20, t=40, b=20),
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)'
             )
-        )])
-        
-        # Set title
-        title = f"Data for: {query_text}"
-        fig.update_layout(title=title)
-        
-        return fig
-    
-    def _generate_title(self, query_text: str, x_col: str, y_col: str, chart_type: str = "") -> str:
-        """Generate an appropriate title based on the query and data columns"""
-        query_words = query_text.strip().split()
-        
-        # If query is very short, use the column names
-        if len(query_words) <= 3:
-            if chart_type:
-                return f"{chart_type} of {y_col.replace('_', ' ').title()} by {x_col.replace('_', ' ').title()}"
-            else:
-                return f"{y_col.replace('_', ' ').title()} by {x_col.replace('_', ' ').title()}"
-        
-        # Use first 8 words of query if not too long
-        if len(query_words) <= 10:
-            return query_text.capitalize()
-        
-        # Otherwise use truncated query
-        return " ".join(query_words[:8]) + "..."
-    
-    def _fig_to_base64(self, fig: go.Figure) -> str:
-        """Convert a plotly figure to base64 encoded PNG"""
-        try:
-            # Create a BytesIO object to store the image
-            img_bytes = io.BytesIO()
             
-            # Write the figure as a PNG to the BytesIO object
-            fig.write_image(img_bytes, format='png', width=800, height=500)
-            
-            # Reset the pointer to the beginning of the BytesIO object
-            img_bytes.seek(0)
-            
-            # Encode the PNG as base64
-            img_base64 = base64.b64encode(img_bytes.read()).decode('utf-8')
-            
-            return img_base64
+            return {
+                "type": "plotly",
+                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+            }
         except Exception as e:
-            logger.error(f"Error converting figure to base64: {str(e)}")
-            return ""
+            logger.error(f"Error creating time series: {str(e)}")
+            return self._create_default_visualization(df, query)
     
-    # Public methods that will be called by ChatService
-    def create_bar_chart(self, data: List[Dict[str, Any]], query_text: str = "Visitor data") -> Optional[str]:
-        """Create a bar chart visualization from the given data"""
+    def _create_bar_chart(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
+        """Create a bar chart visualization"""
         try:
-            if self.debug_service:
-                self.debug_service.start_step("bar_chart_creation", {
-                    "data_rows": len(data),
-                    "query_text": query_text
-                })
+            # Simple heuristic: if we have 2 columns, use the first as x and second as y
+            # If more columns, try to find a categorical and a numerical column
+            if len(df.columns) == 2:
+                x_col, y_col = df.columns[0], df.columns[1]
+            else:
+                # Find categorical columns (string or object type)
+                cat_cols = df.select_dtypes(include=['object', 'string', 'category']).columns.tolist()
+                # Find numeric columns
+                num_cols = df.select_dtypes(include=np.number).columns.tolist()
+                
+                if cat_cols and num_cols:
+                    x_col, y_col = cat_cols[0], num_cols[0]
+                elif len(num_cols) >= 2:
+                    x_col, y_col = num_cols[0], num_cols[1]
+                else:
+                    # Fallback
+                    x_col, y_col = df.columns[0], df.columns[1] if len(df.columns) > 1 else df.columns[0]
             
-            # Convert data to DataFrame
-            df = self._convert_to_dataframe(data)
+            # Limit to top 10 items for readability
+            if len(df) > 10:
+                # Sort by the y column and take top 10
+                df = df.sort_values(by=y_col, ascending=False).head(10)
             
-            # Create bar chart
-            fig = self._create_bar_chart(df, query_text)
+            # Create the plot
+            fig = px.bar(df, x=x_col, y=y_col, title=f"{y_col} by {x_col}")
             
-            # Convert to base64
-            img_base64 = self._fig_to_base64(fig)
+            # Improve layout
+            fig.update_layout(
+                margin=dict(l=20, r=20, t=40, b=20),
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)'
+            )
             
-            if self.debug_service:
-                self.debug_service.add_step_details({
-                    "visualization_type": "bar",
-                    "visualization_size": len(img_base64) if img_base64 else 0
-                })
-                self.debug_service.end_step()
-            
-            return img_base64
+            return {
+                "type": "plotly",
+                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+            }
         except Exception as e:
             logger.error(f"Error creating bar chart: {str(e)}")
-            if self.debug_service:
-                self.debug_service.add_step_details({"error": str(e)})
-                self.debug_service.end_step(error=e)
-            return None
+            return self._create_default_visualization(df, query)
     
-    def create_pie_chart(self, data: List[Dict[str, Any]], query_text: str = "Distribution data") -> Optional[str]:
-        """Create a pie chart visualization from the given data"""
+    def _create_pie_chart(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
+        """Create a pie chart visualization"""
         try:
-            if self.debug_service:
-                self.debug_service.start_step("pie_chart_creation", {
-                    "data_rows": len(data),
-                    "query_text": query_text
-                })
+            # Simple heuristic: if we have 2 columns, use the first as labels and second as values
+            if len(df.columns) == 2:
+                labels_col, values_col = df.columns[0], df.columns[1]
+            else:
+                # Find categorical columns (string or object type)
+                cat_cols = df.select_dtypes(include=['object', 'string', 'category']).columns.tolist()
+                # Find numeric columns
+                num_cols = df.select_dtypes(include=np.number).columns.tolist()
+                
+                if cat_cols and num_cols:
+                    labels_col, values_col = cat_cols[0], num_cols[0]
+                else:
+                    # Fallback
+                    labels_col, values_col = df.columns[0], df.columns[1] if len(df.columns) > 1 else df.columns[0]
             
-            # Convert data to DataFrame
-            df = self._convert_to_dataframe(data)
+            # Limit to top 8 items for readability in pie charts
+            if len(df) > 8:
+                # Take the top 7 items plus "Others"
+                top_df = df.sort_values(by=values_col, ascending=False).head(7)
+                others_value = df.sort_values(by=values_col, ascending=False).iloc[7:][values_col].sum()
+                others_df = pd.DataFrame({labels_col: ['Others'], values_col: [others_value]})
+                df = pd.concat([top_df, others_df])
             
-            # Create pie chart
-            fig = self._create_pie_chart(df, query_text)
+            # Create the plot
+            fig = px.pie(df, names=labels_col, values=values_col, title=f"Distribution of {values_col}")
             
-            # Convert to base64
-            img_base64 = self._fig_to_base64(fig)
+            # Improve layout
+            fig.update_layout(
+                margin=dict(l=20, r=20, t=40, b=20),
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)'
+            )
             
-            if self.debug_service:
-                self.debug_service.add_step_details({
-                    "visualization_type": "pie",
-                    "visualization_size": len(img_base64) if img_base64 else 0
-                })
-                self.debug_service.end_step()
-            
-            return img_base64
+            return {
+                "type": "plotly",
+                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+            }
         except Exception as e:
             logger.error(f"Error creating pie chart: {str(e)}")
-            if self.debug_service:
-                self.debug_service.add_step_details({"error": str(e)})
-                self.debug_service.end_step(error=e)
-            return None
+            return self._create_default_visualization(df, query)
     
-    def create_line_chart(self, data: List[Dict[str, Any]], query_text: str = "Trend data") -> Optional[str]:
-        """Create a line chart visualization from the given data"""
+    def _create_geo_chart(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
+        """Create a geographical visualization"""
         try:
-            if self.debug_service:
-                self.debug_service.start_step("line_chart_creation", {
-                    "data_rows": len(data),
-                    "query_text": query_text
-                })
+            # Look for columns that might contain location information
+            loc_cols = [col for col in df.columns if any(term in str(col).lower() for term in ["canton", "region", "city", "location", "area", "country"])]
             
-            # Convert data to DataFrame
-            df = self._convert_to_dataframe(data)
+            # Find numeric column for values
+            num_cols = df.select_dtypes(include=np.number).columns.tolist()
             
-            # Create line chart
-            fig = self._create_line_chart(df, query_text)
+            if not loc_cols or not num_cols:
+                logger.warning("No suitable location or numeric columns found for geo chart")
+                return self._create_default_visualization(df, query)
             
-            # Convert to base64
-            img_base64 = self._fig_to_base64(fig)
+            # Use first location column and first numeric column
+            loc_col = loc_cols[0]
+            value_col = num_cols[0]
             
-            if self.debug_service:
-                self.debug_service.add_step_details({
-                    "visualization_type": "line",
-                    "visualization_size": len(img_base64) if img_base64 else 0
-                })
-                self.debug_service.end_step()
+            # Create a basic choropleth map (placeholder - would need proper geo data)
+            fig = px.choropleth(
+                df,
+                locations=loc_col,  # This would need to be properly formatted ISO codes
+                color=value_col,
+                title=f"{value_col} by {loc_col}",
+                # Placeholder - real implementation would need proper geo data
+                scope="europe"
+            )
             
-            return img_base64
-        except Exception as e:
-            logger.error(f"Error creating line chart: {str(e)}")
-            if self.debug_service:
-                self.debug_service.add_step_details({"error": str(e)})
-                self.debug_service.end_step(error=e)
-            return None
-    
-    def create_default_visualization(self, data: List[Dict[str, Any]], query_text: str = "Query results") -> Optional[str]:
-        """Create a default visualization based on the data"""
-        try:
-            if self.debug_service:
-                self.debug_service.start_step("default_visualization_creation", {
-                    "data_rows": len(data),
-                    "query_text": query_text
-                })
+            # If choropleth isn't suitable, create a fallback scatter_geo
+            if len(df) <= 10:  # For small datasets, fallback to scatter
+                fig = px.scatter_geo(
+                    df,
+                    locations=loc_col,
+                    size=value_col,
+                    title=f"{value_col} by {loc_col}",
+                    scope="europe"
+                )
             
-            # Convert data to DataFrame
-            df = self._convert_to_dataframe(data)
+            # Improve layout
+            fig.update_layout(
+                margin=dict(l=0, r=0, t=30, b=0),
+                geo=dict(
+                    showland=True,
+                    landcolor="rgb(243, 243, 243)",
+                    countrycolor="rgb(204, 204, 204)"
+                )
+            )
             
-            # Determine best visualization type
-            viz_type = self._determine_visualization_type(df, query_text)
-            
-            # Create appropriate visualization
-            if viz_type == "bar":
-                fig = self._create_bar_chart(df, query_text)
-            elif viz_type == "line":
-                fig = self._create_line_chart(df, query_text)
-            elif viz_type == "pie":
-                fig = self._create_pie_chart(df, query_text)
-            elif viz_type == "geo":
-                fig = self._create_geo_chart(df, query_text)
-            else:
-                fig = self._create_table(df, query_text)
-            
-            # Convert to base64
-            img_base64 = self._fig_to_base64(fig)
-            
-            if self.debug_service:
-                self.debug_service.add_step_details({
-                    "visualization_type": viz_type,
-                    "visualization_size": len(img_base64) if img_base64 else 0
-                })
-                self.debug_service.end_step()
-            
-            return img_base64
-        except Exception as e:
-            logger.error(f"Error creating default visualization: {str(e)}")
-            if self.debug_service:
-                self.debug_service.add_step_details({"error": str(e)})
-                self.debug_service.end_step(error=e)
-            return None
-            
-    def create_geo_chart(self, data: List[Dict[str, Any]], query_text: str = "Geographic data") -> Optional[str]:
-        """Create a geographic visualization from the given data"""
-        try:
-            if self.debug_service:
-                self.debug_service.start_step("geo_chart_creation", {
-                    "data_rows": len(data),
-                    "query_text": query_text
-                })
-            
-            # Convert data to DataFrame
-            df = self._convert_to_dataframe(data)
-            
-            # Create geo chart
-            fig = self._create_geo_chart(df, query_text)
-            
-            # Convert to base64
-            img_base64 = self._fig_to_base64(fig)
-            
-            if self.debug_service:
-                self.debug_service.add_step_details({
-                    "visualization_type": "geo",
-                    "visualization_size": len(img_base64) if img_base64 else 0
-                })
-                self.debug_service.end_step()
-            
-            return img_base64
+            return {
+                "type": "plotly",
+                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+            }
         except Exception as e:
             logger.error(f"Error creating geo chart: {str(e)}")
-            if self.debug_service:
-                self.debug_service.add_step_details({"error": str(e)})
-                self.debug_service.end_step(error=e)
-            return None 
+            return self._create_default_visualization(df, query)
+    
+    def _create_default_visualization(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
+        """Create a default visualization based on data characteristics"""
+        try:
+            # If we have few rows, return a table
+            if len(df) <= 10:
+                return self._create_table(df, query)
+            
+            # Check if we have numeric columns
+            num_cols = df.select_dtypes(include=np.number).columns.tolist()
+            if num_cols:
+                # We have numeric data, try a bar chart
+                return self._create_simple_bar_chart(df, query)
+            else:
+                # No numeric data, return a table
+                return self._create_table(df, query)
+        except Exception as e:
+            logger.error(f"Error creating default visualization: {str(e)}")
+            return self._create_table(df, query)
+    
+    def _create_simple_bar_chart(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
+        """Create a simple Plotly bar chart."""
+        try:
+            # Limit rows for readability
+            if len(df) > 20:
+                df = df.head(20)
+            
+            # Find categorical column for x-axis (non-numeric with few unique values)
+            categorical_cols = [col for col in df.columns if col not in df.select_dtypes(include=[np.number]).columns]
+            
+            # If no categorical columns, use index
+            if not categorical_cols:
+                x_col = df.index.name or 'index'
+                df = df.reset_index()
+            else:
+                # Choose categorical column with the least unique values
+                unique_counts = [(col, df[col].nunique()) for col in categorical_cols]
+                unique_counts.sort(key=lambda x: x[1])
+                x_col = unique_counts[0][0] if unique_counts else df.columns[0]
+            
+            # Get numeric columns for y-axis
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            
+            # Limit to at most 3 y columns for readability
+            y_cols = numeric_cols[:3]
+            
+            if not y_cols:
+                # No numeric columns, create count-based bar chart
+                value_counts = df[x_col].value_counts().reset_index()
+                value_counts.columns = [x_col, 'count']
+                
+                fig = go.Figure(go.Bar(
+                    x=value_counts[x_col],
+                    y=value_counts['count'],
+                    text=value_counts['count'],
+                    textposition='auto'
+                ))
+                
+                fig.update_layout(
+                    title=f"Count of {x_col}",
+                    xaxis_title=str(x_col),
+                    yaxis_title="Count",
+                    template="plotly_white"
+                )
+            else:
+                # Create a grouped bar chart for multiple y columns
+                fig = go.Figure()
+                
+                for y_col in y_cols:
+                    fig.add_trace(go.Bar(
+                        x=df[x_col],
+                        y=df[y_col],
+                        name=str(y_col)
+                    ))
+                
+                fig.update_layout(
+                    title=f"{', '.join(str(col) for col in y_cols)} by {x_col}",
+                    xaxis_title=str(x_col),
+                    yaxis_title="Value",
+                    legend_title="Metrics",
+                    barmode='group',
+                    template="plotly_white"
+                )
+            
+            return {
+                "type": "plotly",
+                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+            }
+        
+        except Exception as e:
+            logger.error(f"Error creating bar chart: {str(e)}", exc_info=True)
+            return {"type": "table", "data": df.to_dict(orient="records")}
+    
+    def _create_simple_line_chart(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
+        """Create a simple Plotly line chart."""
+        try:
+            # Find the best x column (prefer date/time columns)
+            date_cols = [col for col in df.columns if self._is_date_column(df[col])]
+            
+            # If no date columns, look for columns that might be dates based on name
+            if not date_cols:
+                potential_date_cols = [col for col in df.columns if any(term in str(col).lower() 
+                                                                      for term in ["date", "time", "year", "month", "day"])]
+                date_cols = potential_date_cols
+            
+            # If still no date columns, use the first column as x
+            x_col = date_cols[0] if date_cols else df.columns[0]
+            
+            # Get numeric columns for y-axis (exclude the x column if it's numeric)
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            if x_col in numeric_cols:
+                numeric_cols.remove(x_col)
+            
+            # Limit to at most 5 y columns for readability
+            y_cols = numeric_cols[:5]
+            
+            # Create plotly figure
+            fig = go.Figure()
+            
+            for y_col in y_cols:
+                fig.add_trace(go.Scatter(
+                    x=df[x_col],
+                    y=df[y_col],
+                    mode='lines+markers',
+                    name=str(y_col)
+                ))
+            
+            # Update layout
+            fig.update_layout(
+                title=f"Trends in {', '.join(str(col) for col in y_cols)}",
+                xaxis_title=str(x_col),
+                yaxis_title="Value",
+                legend_title="Metrics",
+                template="plotly_white"
+            )
+            
+            return {
+                "type": "plotly",
+                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+            }
+        
+        except Exception as e:
+            logger.error(f"Error creating line chart: {str(e)}", exc_info=True)
+            return {"type": "table", "data": df.to_dict(orient="records")}
+
+    def _create_heatmap(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
+        """Create a Plotly heatmap for correlation analysis."""
+        try:
+            # Get numeric columns for correlation
+            numeric_df = df.select_dtypes(include=[np.number])
+            
+            # If not enough numeric columns, return table
+            if len(numeric_df.columns) < 2:
+                return {"type": "table", "data": df.to_dict(orient="records")}
+            
+            # Calculate correlation matrix
+            corr_matrix = numeric_df.corr()
+            
+            # Create heatmap
+            fig = go.Figure(data=go.Heatmap(
+                z=corr_matrix.values,
+                x=corr_matrix.columns,
+                y=corr_matrix.index,
+                colorscale='RdBu_r',
+                zmin=-1,
+                zmax=1,
+                cmid=0,
+                text=np.round(corr_matrix.values, 2),
+                hoverinfo='text'
+            ))
+            
+            fig.update_layout(
+                title="Correlation Heatmap",
+                xaxis_title="Features",
+                yaxis_title="Features",
+                template="plotly_white"
+            )
+            
+            return {
+                "type": "plotly",
+                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+            }
+        
+        except Exception as e:
+            logger.error(f"Error creating heatmap: {str(e)}", exc_info=True)
+            return {"type": "table", "data": df.to_dict(orient="records")}
+    
+    def _is_date_column(self, column: pd.Series) -> bool:
+        """Check if a column contains date/time data."""
+        # Check if the column is already a datetime type
+        if pd.api.types.is_datetime64_any_dtype(column):
+            return True
+        
+        # If it's an object type, check if the values are datetime objects
+        if pd.api.types.is_object_dtype(column):
+            non_null_values = [x for x in column if x is not None and not pd.isna(x)]
+            if non_null_values and all(isinstance(x, (datetime, date)) for x in non_null_values):
+                return True
+            
+            # Try parsing a sample of the values
+            try:
+                sample = non_null_values[:5] if len(non_null_values) > 5 else non_null_values
+                if sample and all(isinstance(pd.to_datetime(x), (pd.Timestamp)) for x in sample):
+                    return True
+            except:
+                pass
+        
+        return False
+    
+    def _extract_title_from_query(self, query: str) -> Optional[str]:
+        """Extract a title from the query for the visualization."""
+        # Remove SQL keywords and common phrases
+        keywords = ["select", "from", "where", "group by", "order by", "having", "show me", "display", "visualize"]
+        clean_query = query.lower()
+        for keyword in keywords:
+            clean_query = clean_query.replace(keyword, "")
+        
+        # Split into words and take first 8 words
+        words = clean_query.split()[:8]
+        if not words:
+            return None
+        
+        # Create a simple title
+        title = " ".join(words).strip().capitalize()
+        if title.endswith("."):
+            title = title[:-1]
+        
+        return title
+    
+    def _create_fallback_visualization(self, results: List[Dict[str, Any]], query: str, error_msg: str) -> Dict[str, Any]:
+        """Create a fallback visualization when all else fails."""
+        try:
+            logger.warning(f"Falling back to table visualization due to error: {error_msg}")
+            
+            # Try to convert to DataFrame
+            try:
+                df = pd.DataFrame(results)
+                # Limit to first 50 rows for display
+                df = df.head(50)
+                table_data = df.to_dict(orient="records")
+            except Exception:
+                # If conversion fails, pass the raw results
+                table_data = results[:50]  # Limit to first 50 items
+            
+            return {
+                "type": "table",
+                "data": table_data,
+                "error": error_msg
+            }
+        except Exception as e:
+            logger.error(f"Error creating fallback visualization: {str(e)}")
+            # Ultimate fallback - return minimal data
+            return {
+                "type": "table",
+                "data": [],
+                "error": f"Visualization failed: {error_msg}. Additional error: {str(e)}"
+            }
+    
+    def _create_table(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
+        """Create a table visualization from the data"""
+        return {
+            "type": "table",
+            "data": json.loads(df.to_json(orient="records", date_format="iso"))
+        } 

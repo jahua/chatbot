@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
     
+    # API URL (for frontend use)
+    API_URL: Optional[str] = os.getenv("API_URL", "http://localhost:8000")
+    
     # Database settings
     POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "")
     POSTGRES_USER: str = os.getenv("POSTGRES_USER", "")

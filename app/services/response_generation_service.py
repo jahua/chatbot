@@ -80,6 +80,17 @@ class ResponseGenerationService:
             # Generate response using the LLM
             generated_response = await self.llm_adapter.agenerate_text(prompt)
             
+            # Check if the response indicates an API error
+            if generated_response.startswith("Error:"):
+                logger.error(f"LLM API error in response generation: {generated_response}")
+                if self.debug_service:
+                    self.debug_service.add_step_details({
+                        "api_error": generated_response
+                    })
+                    self.debug_service.end_step("llm_response_generation", success=False, error=generated_response)
+                # Return a default response instead of the error
+                return f"I analyzed the data but couldn't generate a detailed response due to a service error. Here's a summary of what I found:\n\n- The query returned {len(sql_results) if sql_results else 0} results\n- The data contains information about {query}."
+            
             # Add debug details if debug service is available
             if self.debug_service:
                 self.debug_service.add_step_details({
@@ -88,7 +99,7 @@ class ResponseGenerationService:
                 })
                 
                 # End debug step
-                self.debug_service.end_step()
+                self.debug_service.end_step("llm_response_generation", success=True)
                 
             return generated_response
         except Exception as e:
@@ -96,7 +107,7 @@ class ResponseGenerationService:
             
             # End debug step with error if debug service is available
             if self.debug_service:
-                self.debug_service.end_step(success=False, error=str(e))
+                self.debug_service.end_step("llm_response_generation", success=False, error=str(e))
                 
             return f"I apologize, but I encountered an error while generating a response: {str(e)}"
     

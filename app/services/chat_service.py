@@ -108,15 +108,15 @@ class ChatService:
             # Register the message ID with debug service
             self.debug_service.start_flow(session_id, message_id=message_id)
         
-        yield {"type": "start"}
-        yield {"type": "message_id", "message_id": message_id}
-        yield {"type": "content_start", "message_id": message_id}
-        yield {"type": "content", "content": "Analyzing your question..."}
-
-        processed_results = [] # Initialize to ensure it exists
-        sql_query = "" # Initialize
-
         try:
+            yield {"type": "start"}
+            yield {"type": "message_id", "message_id": message_id}
+            yield {"type": "content_start", "message_id": message_id}
+            yield {"type": "content", "content": "Analyzing your question..."}
+
+            processed_results = [] # Initialize to ensure it exists
+            sql_query = "" # Initialize
+
             # --- Step: Message Processing ---
             current_step_name = "message_processing"
             self.debug_service.start_step(current_step_name)
@@ -173,8 +173,17 @@ class ChatService:
                 try:
                     visualization = self._get_visualization(processed_results, sql_query)
                     if visualization:
-                        yield {"type": "visualization", "visualization": visualization}
+                        # For plotly_json type, yield it directly with its own type
+                        if visualization.get('type') == 'plotly_json':
+                            logger.info("Yielding plotly_json visualization")
+                            yield {"type": "plotly_json", "data": visualization.get('data', {})}
+                        else:
+                            # For other types (table, etc.), use the visualization field as before
+                            logger.info(f"Yielding visualization of type: {visualization.get('type', 'unknown')}")
+                            yield {"type": "visualization", "visualization": visualization}
+                        
                         self.debug_service.update_step(current_step_name, details={"visualization_generated": True})
+                        self.debug_service.end_step(current_step_name, success=True)
                     else:
                         self.debug_service.update_step(current_step_name, details={"visualization_skipped": True})
                     self.debug_service.end_step(current_step_name, success=True)
@@ -197,6 +206,22 @@ class ChatService:
                         live_schema_string=schema_context,
                         dw_context=dw_context
                     )
+                    
+                    # Check if the SQL generation resulted in an API error
+                    if not sql_query or sql_query.startswith("Error:"):
+                        logger.error(f"SQL generation failed: {sql_query}")
+                        self.debug_service.end_step(current_step_name, success=False, error=sql_query)
+                        yield {"type": "content", "content": f"I encountered an error connecting to the language model: {sql_query}"}
+                        yield {"type": "debug_info", "debug_info": {
+                            "steps": self.debug_service.get_steps(),
+                            "status": "error",
+                            "error": sql_query,
+                            "error_type": "API Connection Error",
+                            "processing_time": self.debug_service.get_total_duration()
+                        }}
+                        yield {"type": "end"}
+                        return
+                        
                     if not sql_query: raise ValueError("SQL query generation by LLM returned empty.")
                     
                     # Clean the SQL query by removing any HTML tags
@@ -226,8 +251,44 @@ class ChatService:
                     self.debug_service.update_step(current_step_name, details={"executed_successfully": True, "results_processed": True, "row_count": len(processed_results)})
                     self.debug_service.end_step(current_step_name, success=True)
                 except Exception as step_e:
+                    logger.error(f"SQL execution error: {str(step_e)}")
                     self.debug_service.end_step(current_step_name, success=False, error=str(step_e))
-                    raise
+                    
+                    # Check if this is a GROUP BY error
+                    error_msg = str(step_e).lower()
+                    if "group by" in error_msg and ("extract" in sql_query.lower() or "date_trunc" in sql_query.lower()):
+                        logger.info("Attempting to fix GROUP BY error in SQL query")
+                        try:
+                            # Try to fix the query manually
+                            fixed_query = self._fix_group_by_error(sql_query)
+                            if fixed_query != sql_query:
+                                logger.info(f"SQL query fixed. Retrying execution with fixed query.")
+                                yield {"type": "content", "content": "I found an issue with the query and am trying to fix it..."}
+                                yield {"type": "sql_query", "sql_query": fixed_query}
+                                
+                                # Retry with fixed query
+                                formatted_sql = format_sql(fixed_query) if self.sql_formatter is None else self.sql_formatter.format_sql(fixed_query)
+                                result = await self.db_service.execute_query_async(formatted_sql)
+                                processed_results = self._process_sql_results(result)
+                                logger.info(f"Fixed SQL query executed. Row count: {len(processed_results)}")
+                                self.debug_service.update_step(current_step_name, details={
+                                    "executed_successfully": True, 
+                                    "query_fixed": True,
+                                    "results_processed": True, 
+                                    "row_count": len(processed_results)
+                                })
+                                sql_query = fixed_query  # Update the sql_query variable to use the fixed version
+                                self.debug_service.end_step(current_step_name, success=True)
+                            else:
+                                # Could not fix, rethrow
+                                raise
+                        except Exception as fix_e:
+                            logger.error(f"Failed to fix and execute SQL query: {str(fix_e)}")
+                            # Rethrow the original error
+                            raise step_e
+                    else:
+                        # Not a GROUP BY error or couldn't fix it, rethrow
+                        raise
 
                 # --- Step: Response Generation ---
                 current_step_name = "response_generation"
@@ -277,35 +338,99 @@ class ChatService:
                 try:
                     visualization = self._get_visualization(processed_results, sql_query)
                     if visualization:
-                        yield {"type": "visualization", "visualization": visualization}
-                        self.debug_service.update_step(current_step_name, details={"visualization_generated": True}) # Removed type/size for simplicity
+                        # For plotly_json type, yield it directly with its own type
+                        if visualization.get('type') == 'plotly_json':
+                            logger.info("Yielding plotly_json visualization")
+                            yield {"type": "plotly_json", "data": visualization.get('data', {})}
+                        else:
+                            # For other types (table, etc.), use the visualization field as before
+                            logger.info(f"Yielding visualization of type: {visualization.get('type', 'unknown')}")
+                            yield {"type": "visualization", "visualization": visualization}
+                        
+                        self.debug_service.update_step(current_step_name, details={"visualization_generated": True})
+                        self.debug_service.end_step(current_step_name, success=True)
                     else:
-                        self.debug_service.update_step(current_step_name, details={"visualization_skipped": True})
-                    self.debug_service.end_step(current_step_name, success=True)
+                        # If first attempt fails, try recovering another visualization
+                        logger.info("First visualization attempt didn't produce a result, trying recovery")
+                        visualization = self._attempt_recovery_visualization(processed_results, message, sql_query)
+                        if visualization:
+                            # Also check the recovery visualization type
+                            if visualization.get('type') == 'plotly_json':
+                                logger.info("Yielding recovered plotly_json visualization")
+                                yield {"type": "plotly_json", "data": visualization.get('data', {})}
+                            else:
+                                logger.info(f"Yielding recovered visualization of type: {visualization.get('type', 'unknown')}")
+                                yield {"type": "visualization", "visualization": visualization}
+                                
+                            self.debug_service.update_step(current_step_name, details={
+                                "visualization_generated": True,
+                                "recovery_attempted": True,
+                                "recovery_succeeded": True
+                            })
+                            self.debug_service.end_step(current_step_name, success=True)
+                        else:
+                            logger.warning("Both primary and recovery visualization failed to generate")
+                            self.debug_service.update_step(current_step_name, details={
+                                "visualization_generated": False,
+                                "recovery_attempted": True,
+                                "recovery_succeeded": False
+                            })
+                            self.debug_service.end_step(current_step_name, success=False, error="All visualization attempts failed")
                 except Exception as step_e:
-                    logger.warning(f"Visualization creation/yielding failed, but continuing: {str(step_e)}")
-                    self.debug_service.end_step(current_step_name, success=False, error=f"Handled viz error: {str(step_e)}")
-                    # Do not raise, allow flow to finish
+                    logger.error(f"Error in visualization step: {str(step_e)}", exc_info=True)
+                    self.debug_service.end_step(current_step_name, success=False, error=str(step_e))
+                    # Don't set flow_succeeded = False for viz failures
 
             else: # Fallback for other query types
                 yield {"type": "content", "content": "Sorry, I can only process natural language queries or direct SQL for now."}
 
-
+            # Collect debug info after all steps
+            debug_info = {
+                "steps": self.debug_service.get_steps(),
+                "status": "success" if flow_succeeded else "error",
+                "processing_time": self.debug_service.get_total_duration()
+            }
+            
+            # Yield debug info at the end
+            yield {"type": "debug_info", "debug_info": debug_info}
+            
+            # Signal end of stream
+            yield {"type": "end"}
+            
+        except GeneratorExit:
+            # Handle the case when the client disconnects
+            logger.warning("Client disconnected during streaming - handling GeneratorExit")
+            # Clean up any resources if needed
+            self.debug_service.add_flow_note(f"Stream interrupted by client disconnection")
+            return
+            
         except Exception as e:
-            flow_succeeded = False # Mark overall flow as failed
-            logger.error(f"Chat stream processing failed in step '{current_step_name}': {str(e)}", exc_info=True)
-            # Ensure the step that raised the exception is marked as failed if not already
-            # The specific step's except block should have already called end_step
-            # We just yield the generic error message here
-            yield {"type": "error", "error": f"Sorry, I encountered an error: {str(e)}"}
-
-        finally:
-            # Final debug info yield
-            debug_info_data = self.debug_service.end_flow(success=flow_succeeded)
-            yield {"type": "debug_info", "debug_info": debug_info_data}
-            # Final end marker
-            yield {"type": "end", "message_id": message_id}
-            logger.info(f"Finished processing chat stream for session {session_id}. Success: {flow_succeeded}")
+            # Log and handle any exceptions
+            error_message = f"Error in chat stream processing: {str(e)}"
+            logger.error(error_message, exc_info=True)
+            self.debug_service.add_flow_note(f"Error: {str(e)}")
+            
+            # Get debug info in case of error
+            debug_info = {
+                "steps": self.debug_service.get_steps(),
+                "status": "error",
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "processing_time": self.debug_service.get_total_duration()
+            }
+            
+            # Try to yield error information to the client
+            try:
+                yield {"type": "content", "content": f"I encountered an error: {str(e)}"}
+                yield {"type": "debug_info", "debug_info": debug_info}
+                yield {"type": "end"}
+            except GeneratorExit:
+                # If client disconnected during error handling, just log and exit
+                logger.warning("Client disconnected while sending error - handling GeneratorExit during error yield")
+                return
+            except Exception as yield_error:
+                # If we can't yield the error (e.g., connection already closed), log and continue
+                logger.error(f"Failed to yield error to client: {str(yield_error)}")
 
     def is_conversational_message(self, message: str) -> bool:
         """Detect if a message is conversational rather than a data query"""
@@ -403,10 +528,14 @@ class ChatService:
             logger.error(traceback.format_exc())
             return "I can help you analyze tourism data including visitor statistics and transaction data. Please ask a specific question about tourism patterns."
     
-    def _split_into_chunks(self, text: str, chunk_size: int = 50):
+    def _split_into_chunks(self, text: str, chunk_size: int = 1000):
         """Yield successive chunk_size chunks from text."""
         if not text:
             return
+        
+        # Log the full response text for debugging
+        logger.info(f"Response to be chunked (length {len(text)}): {text}")
+        
         for i in range(0, len(text), chunk_size):
             yield text[i:i + chunk_size]
             
@@ -496,7 +625,15 @@ class ChatService:
             # Directly use the main visualization service method with built-in error handling
             visualization_data = self.visualization_service.create_visualization(results, query)
             if visualization_data:
-                logger.info(f"Successfully generated visualization of type: {visualization_data.get('chart_type', 'unknown')}")
+                vis_type = visualization_data.get('type', 'unknown')
+                logger.info(f"Successfully generated visualization of type: {vis_type}")
+                
+                # Convert 'plotly' type to 'plotly_json' for the frontend
+                if vis_type == 'plotly':
+                    return {
+                        "type": "plotly_json",
+                        "data": visualization_data.get('data', {})
+                    }
                 return visualization_data
             else:
                 logger.warning("Visualization service returned None")
@@ -518,11 +655,19 @@ class ChatService:
                             row[key] = str(row[key])
                 
                 # Use the fallback visualization method directly
-                return self.visualization_service._create_fallback_visualization(
+                fallback_viz = self.visualization_service._create_fallback_visualization(
                     simplified_results, 
                     query, 
                     f"Error in primary visualization: {str(e)}"
                 )
+                
+                # Also check the fallback visualization for Plotly format
+                if fallback_viz and fallback_viz.get('type') == 'plotly':
+                    return {
+                        "type": "plotly_json",
+                        "data": fallback_viz.get('data', {})
+                    }
+                return fallback_viz
             except Exception as fallback_e:
                 logger.error(f"Fallback visualization also failed: {str(fallback_e)}")
                 
@@ -691,3 +836,83 @@ Tables:
     def _get_dw_analytics_agent(self, dw_db: Session) -> DWAnalyticsAgent:
         """Get or create a DWAnalyticsAgent with the provided database session"""
         return DWAnalyticsAgent(dw_db)
+
+    def _attempt_recovery_visualization(self, results: List[Dict[str, Any]], message: str, sql_query: str) -> Optional[Dict[str, Any]]:
+        """Attempt to recover from a failed visualization by generating a different type of visualization"""
+        try:
+            # Implement recovery logic here
+            # This is a placeholder and should be replaced with actual recovery logic
+            logger.info("Attempting to recover from failed visualization")
+            visualization = self._get_visualization(results, sql_query)
+            
+            # Check if the visualization is a Plotly chart
+            if visualization and visualization.get('type') == 'plotly':
+                logger.info("Converting recovery plotly visualization format for frontend")
+                return {
+                    "type": "plotly_json",
+                    "data": visualization.get('data', {})
+                }
+            
+            return visualization
+        except Exception as e:
+            logger.error(f"Recovery visualization failed: {str(e)}")
+            return None
+
+    def _fix_group_by_error(self, sql_query: str) -> str:
+        """Attempt to fix GROUP BY errors in a SQL query"""
+        fixed_query = sql_query
+        
+        # Pattern to find EXTRACT expressions in SELECT
+        extract_pattern = r'EXTRACT\s*\(\s*(\w+)\s+FROM\s+([^\)]+)\)\s+AS\s+(\w+)'
+        
+        # Find all EXTRACT expressions
+        extracts = re.finditer(extract_pattern, sql_query, re.IGNORECASE)
+        
+        for match in extracts:
+            extract_type = match.group(1)   # year, month, etc.
+            column = match.group(2)         # d.full_date
+            alias = match.group(3)          # year, month, alias
+            
+            # Check if this alias is used in GROUP BY
+            group_by_pattern = rf'GROUP\s+BY\s+[^;]*(^|,|\s){alias}($|,|\s)'
+            
+            # If we find the alias in a GROUP BY clause
+            if re.search(group_by_pattern, sql_query, re.IGNORECASE | re.MULTILINE):
+                # Replace the alias in GROUP BY with the full EXTRACT expression
+                fixed_query = re.sub(
+                    rf'(GROUP\s+BY\s+[^;]*)(^|,|\s){alias}($|,|\s)',
+                    f'\\1\\2EXTRACT({extract_type} FROM {column})\\3',
+                    fixed_query,
+                    flags=re.IGNORECASE | re.MULTILINE
+                )
+                
+        # Try to find and fix issues with CTEs and GROUP BY
+        if "WITH" in fixed_query.upper() and "GROUP BY" in fixed_query.upper():
+            # Split into CTEs and main query
+            parts = re.split(r'SELECT', fixed_query, flags=re.IGNORECASE, maxsplit=1)
+            if len(parts) > 1:
+                cte_part = parts[0]
+                main_part = "SELECT" + parts[1]
+                
+                # Check if there are EXTRACT expressions in CTEs that need fixing
+                cte_extracts = re.finditer(extract_pattern, cte_part, re.IGNORECASE)
+                
+                for match in cte_extracts:
+                    extract_type = match.group(1)
+                    column = match.group(2)
+                    alias = match.group(3)
+                    
+                    # Look for group by with this alias in CTE part
+                    cte_group_pattern = rf'GROUP\s+BY\s+[^)]*\b{alias}\b'
+                    if re.search(cte_group_pattern, cte_part, re.IGNORECASE):
+                        cte_part = re.sub(
+                            rf'(GROUP\s+BY\s+[^)]*)(\b{alias}\b)',
+                            f'\\1EXTRACT({extract_type} FROM {column})',
+                            cte_part,
+                            flags=re.IGNORECASE
+                        )
+                
+                # Recombine the query
+                fixed_query = cte_part + main_part
+        
+        return fixed_query

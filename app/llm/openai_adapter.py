@@ -34,6 +34,8 @@ class OpenAIAdapter:
         if not self.api_key:
             raise ValueError("OpenAI API key is required")
             
+        logger.info(f"Initializing OpenAI adapter with API base: {self.api_base}")
+            
         # Initialize OpenAI client
         self.client = AsyncOpenAI(
             api_key=self.api_key,
