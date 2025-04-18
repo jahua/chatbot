@@ -119,12 +119,17 @@ def prepare_debug_info(debug_info):
         return debug_info
         
     # If there's a steps key, ensure all steps are dictionaries, not DebugStep objects
-    if "steps" in debug_info and isinstance(debug_info["steps"], list):
-        # Convert each step to a dictionary if it's not already
-        for i, step in enumerate(debug_info["steps"]):
-            if isinstance(step, DebugStep):
-                # If the step is a DebugStep object, convert it to dict using asdict
-                debug_info["steps"][i] = asdict(step)
+    if "steps" in debug_info:
+        # Handle case where steps is a single DebugStep object
+        if isinstance(debug_info["steps"], DebugStep):
+            debug_info["steps"] = [asdict(debug_info["steps"])]
+        # Handle case where steps is a list of objects
+        elif isinstance(debug_info["steps"], list):
+            # Convert each step to a dictionary if it's not already
+            for i, step in enumerate(debug_info["steps"]):
+                if isinstance(step, DebugStep):
+                    # If the step is a DebugStep object, convert it to dict using asdict
+                    debug_info["steps"][i] = asdict(step)
     
     return debug_info
 
