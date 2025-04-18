@@ -151,6 +151,11 @@ class ChatService:
                 self.debug_service.start_step(current_step_name)
                 try:
                     sql_query = message # Direct query is the message itself
+                    
+                    # Clean the SQL query by removing any HTML tags
+                    sql_query = re.sub(r'<[^>]*>', '', sql_query)
+                    sql_query = sql_query.strip()
+                    
                     yield {"type": "sql_query", "sql_query": sql_query}
                     result = await self.db_service.execute_query_async(sql_query)
                     processed_results = self._process_sql_results(result)
@@ -195,6 +200,11 @@ class ChatService:
                         dw_context=dw_context
                     )
                     if not sql_query: raise ValueError("SQL query generation by LLM returned empty.")
+                    
+                    # Clean the SQL query by removing any HTML tags
+                    sql_query = re.sub(r'<[^>]*>', '', sql_query)
+                    sql_query = sql_query.strip()
+                    
                     yield {"type": "sql_query", "sql_query": sql_query}
                     self.debug_service.update_step(current_step_name, details={"sql_generated": True, "sql_query": sql_query})
                     self.debug_service.end_step(current_step_name, success=True)
@@ -207,6 +217,10 @@ class ChatService:
                 self.debug_service.start_step(current_step_name)
                 try:
                     logger.info(f"Executing SQL query: {sql_query}")
+                    # Make sure SQL query is cleaned of any HTML tags again before formatting
+                    sql_query = re.sub(r'<[^>]*>', '', sql_query)
+                    sql_query = sql_query.strip()
+                    
                     formatted_sql = format_sql(sql_query) if self.sql_formatter is None else self.sql_formatter.format_sql(sql_query)
                     result = await self.db_service.execute_query_async(formatted_sql)
                     processed_results = self._process_sql_results(result)
@@ -413,24 +427,29 @@ class ChatService:
             return processed_results
             
         try:
-            # If result is already a list of dictionaries (from services.database_service)
+            # If result is already a list
             if isinstance(result, list):
                 if not result:
                     return []
+                
+                # Handle list of tuples or other non-dictionary objects
+                if not isinstance(result[0], dict):
+                    logger.warning(f"Result contains non-dictionary items: {type(result[0])}. Converting...")
+                    # Try to convert to dictionaries if possible
+                    if isinstance(result[0], (list, tuple)):
+                        # For lists or tuples, create dictionaries with numbered keys
+                        for row in result:
+                            row_dict = {f"col_{i}": value for i, value in enumerate(row)}
+                            processed_results.append(self._process_dict_values(row_dict))
+                        return processed_results
+                    else:
+                        # For other types, wrap each item in a dictionary
+                        return [{"value": item} for item in result]
                     
                 # If items in the list are already dictionaries, just process their values
-                if isinstance(result[0], dict):
-                    for row in result:
-                        row_dict = {}
-                        for key, value in row.items():
-                            if isinstance(value, (datetime.date, datetime.datetime)):
-                                row_dict[key] = value.isoformat()
-                            elif isinstance(value, decimal.Decimal):
-                                row_dict[key] = float(value)
-                            else:
-                                row_dict[key] = value
-                        processed_results.append(row_dict)
-                    return processed_results
+                for row in result:
+                    processed_results.append(self._process_dict_values(row))
+                return processed_results
             
             # If result is a SQLAlchemy Result object (from db.database)
             if hasattr(result, 'keys'):
@@ -439,25 +458,31 @@ class ChatService:
                     row_dict = {}
                     for key in keys:
                         value = row[key]
-                        if isinstance(value, (datetime.date, datetime.datetime)):
-                            row_dict[key] = value.isoformat()
-                        elif isinstance(value, decimal.Decimal):
-                            row_dict[key] = float(value)
-                        else:
-                            row_dict[key] = value
-                    processed_results.append(row_dict)
+                        row_dict[key] = value
+                    processed_results.append(self._process_dict_values(row_dict))
                 return processed_results
                 
             # If we got here, we don't know how to process this result format
-            logger.warning(f"Unknown result format: {type(result)}. Returning empty list.")
-            return []
+            logger.warning(f"Unknown result format: {type(result)}. Converting to string representation.")
+            # Convert to string and wrap in a dictionary
+            return [{"result": str(result)}]
             
         except Exception as e:
             logger.error(f"Error processing SQL results: {str(e)}", exc_info=True)
-            # Decide how to handle partial processing or return empty
-            return []  # Return empty list on processing error
-             
-        return processed_results
+            # Return with error information
+            return [{"error": f"Error processing results: {str(e)}"}]
+    
+    def _process_dict_values(self, row_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Process dictionary values to ensure they are JSON-serializable."""
+        processed_dict = {}
+        for key, value in row_dict.items():
+            if isinstance(value, (datetime.date, datetime.datetime)):
+                processed_dict[key] = value.isoformat()
+            elif isinstance(value, decimal.Decimal):
+                processed_dict[key] = float(value)
+            else:
+                processed_dict[key] = value
+        return processed_dict
 
     def _get_visualization(self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
         """Generate visualization based on query results, handling potential errors."""

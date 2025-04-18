@@ -172,7 +172,7 @@ def process_streaming_query(query: str, request_id: str):
         # Start streaming request with a timeout to prevent hanging
         with requests.post(
             "http://localhost:8000/chat/stream",
-            json={"message": query},
+            json={"message": query, "session_id": st.session_state.current_chat_id, "is_direct_query": False},
             headers={"Content-Type": "application/json"},
             stream=True,
             timeout=60  # 60 second timeout
@@ -196,7 +196,12 @@ def process_streaming_query(query: str, request_id: str):
                     logger.debug(f"Received streaming chunk: {data.get('type')}")
                     
                     # Update the message based on the chunk type
-                    if data.get("type") == "content":
+                    if data.get("type") == "content_start":
+                        # Marks the start of content - could initialize content here
+                        logger.debug("Content stream starting")
+                        # No change needed for now
+                        
+                    elif data.get("type") == "content":
                         # Append content to existing message
                         st.session_state.messages[-1]["content"] += data.get("content", "")
                         # Force UI update
@@ -205,14 +210,18 @@ def process_streaming_query(query: str, request_id: str):
                     elif data.get("type") == "sql_query":
                         # Set SQL query
                         st.session_state.messages[-1]["sql_query"] = data.get("sql_query")
+                        logger.debug(f"SQL query received: {data.get('sql_query')[:50]}...")
+                        # Force UI update
+                        st.rerun()
                         
                     elif data.get("type") == "visualization":
                         # Store visualization data
                         vis_data = data.get("visualization", {})
                         st.session_state.messages[-1]["visualization"] = vis_data
+                        logger.debug(f"Visualization received: {type(vis_data)}")
                         
                         # Handle visualization display based on type
-                        vis_type = vis_data.get("type")
+                        vis_type = vis_data.get("type") if isinstance(vis_data, dict) else None
                         
                         if vis_type == "table":
                             # Convert data to pandas DataFrame and display
@@ -235,9 +244,8 @@ def process_streaming_query(query: str, request_id: str):
                                 image = Image.open(BytesIO(image_bytes))
                                 st.image(image)
                             except Exception as e:
-                                st.error(f"Error displaying image visualization: {str(e)}")
                                 logger.error(f"Error displaying image: {str(e)}")
-                                debug_info["error"] = str(e)
+                                st.error(f"Error displaying visualization: {str(e)}")
                         else:
                             # Default handling for other visualization types
                             st.json(vis_data)
@@ -261,11 +269,20 @@ def process_streaming_query(query: str, request_id: str):
                         # Handle error messages
                         error_msg = data.get("error", "An unknown error occurred")
                         st.session_state.messages[-1]["content"] += f"\n\nError: {error_msg}"
+                        logger.error(f"Error from backend: {error_msg}")
                         # Force UI update
                         st.rerun()
                         
+                    elif data.get("type") == "message_id":
+                        # Store message ID if provided
+                        message_id = data.get("message_id")
+                        if message_id:
+                            logger.debug(f"Message ID received: {message_id}")
+                            st.session_state.messages[-1]["message_id"] = message_id
+                        
                     elif data.get("type") == "end":
                         # End of stream, mark streaming as complete
+                        logger.debug("End of stream received")
                         st.session_state.messages[-1]["is_streaming"] = False
                         st.session_state.processing = False
                         # Force final UI update
@@ -287,7 +304,7 @@ def process_streaming_query(query: str, request_id: str):
         st.rerun()
         
     except Exception as e:
-        logger.error(f"Unexpected error in streaming process: {str(e)}")
+        logger.error(f"Unexpected error in streaming process: {str(e)}", exc_info=True)
         st.session_state.messages[-1]["content"] = f"Sorry, I encountered an unexpected error: {str(e)}"
         st.session_state.messages[-1]["is_streaming"] = False 
         st.session_state.processing = False
@@ -349,44 +366,69 @@ def display_message(message):
             # Display visualization if available
             if message.get("visualization"):
                 vis_data = message["visualization"]
+                logger.debug(f"Displaying visualization: {type(vis_data)}")
                 
-                # Check the type of visualization
-                vis_type = vis_data.get("type", "")
-                
-                if vis_type == "table":
-                    # If it's table data, display as dataframe
-                    try:
-                        table_data = vis_data.get("data", [])
-                        if table_data:
-                            df = pd.DataFrame(table_data)
-                            st.dataframe(df, use_container_width=True)
-                    except Exception as e:
-                        st.error(f"Error displaying table visualization: {str(e)}")
-                
-                elif vis_type == "image":
-                    # If it's an image, display it
-                    try:
-                        # Handle base64 image data
-                        image_data = vis_data.get("data", "")
+                # Handle different visualization formats
+                try:
+                    # Check the type of visualization
+                    if isinstance(vis_data, dict):
+                        vis_type = vis_data.get("type", "")
                         
-                        # Check if it's a data URI or just base64
-                        if "base64," in image_data:
-                            # Extract the actual base64 part
-                            b64_data = image_data.split("base64,")[1]
-                        else:
-                            b64_data = image_data
+                        if vis_type == "table":
+                            # If it's table data, display as dataframe
+                            table_data = vis_data.get("data", [])
+                            if table_data:
+                                df = pd.DataFrame(table_data)
+                                st.dataframe(df, use_container_width=True)
+                        
+                        elif vis_type == "image":
+                            # If it's an image, display it
+                            # Handle base64 image data
+                            image_data = vis_data.get("data", "")
                             
-                        # Decode and display
-                        image_bytes = base64.b64decode(b64_data)
-                        image = Image.open(BytesIO(image_bytes))
-                        st.image(image, use_column_width=True)
-                    except Exception as e:
-                        st.error(f"Error displaying image visualization: {str(e)}")
-                        logger.error(f"Visualization error: {str(e)}", exc_info=True)
+                            # Check if it's a data URI or just base64
+                            if "base64," in image_data:
+                                # Extract the actual base64 part
+                                b64_data = image_data.split("base64,")[1]
+                            else:
+                                b64_data = image_data
+                                
+                            # Decode and display
+                            image_bytes = base64.b64decode(b64_data)
+                            image = Image.open(BytesIO(image_bytes))
+                            st.image(image, use_column_width=True)
                         
-                else:
-                    # For other types, show as JSON
-                    st.json(vis_data)
+                        else:
+                            # For other types, show as JSON
+                            st.json(vis_data)
+                    
+                    # If it's raw image data
+                    elif isinstance(vis_data, str) and ("data:image" in vis_data or len(vis_data) > 100):
+                        # Likely a base64 encoded image
+                        try:
+                            # Check if it's a data URI or just base64
+                            if "base64," in vis_data:
+                                # Extract the actual base64 part
+                                b64_data = vis_data.split("base64,")[1]
+                            else:
+                                b64_data = vis_data
+                                
+                            # Decode and display
+                            image_bytes = base64.b64decode(b64_data)
+                            image = Image.open(BytesIO(image_bytes))
+                            st.image(image, use_column_width=True)
+                        except Exception as e:
+                            logger.error(f"Failed to decode image: {str(e)}")
+                            st.error(f"Could not display image visualization")
+                    
+                    # Default fallback for any other format
+                    else:
+                        st.write("Visualization data received:")
+                        st.json(vis_data)
+                
+                except Exception as e:
+                    logger.error(f"Error displaying visualization: {str(e)}", exc_info=True)
+                    st.error(f"Error displaying visualization: {str(e)}")
             
             # Show a debug option for detailed flow information
             if message.get("debug_info"):

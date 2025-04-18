@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 import logging
+from dataclasses import asdict
 from app.db.database import get_db, get_dw_db
 from app.db.dw_connection import get_dw_session
 from app.services.chat_service import ChatService
@@ -12,11 +13,14 @@ from app.schemas.chat import ChatRequest, ChatResponse
 from app.core.config import settings
 from app.db.schema_manager import SchemaManager
 from app.llm.openai_adapter import OpenAIAdapter
+from app.rag.debug_service import DebugStep
 import traceback
 import sys
 import os
 import json
 import asyncio
+from fastapi.responses import JSONResponse
+import uuid
 
 # Ensure log directory exists
 log_dir = os.path.dirname(os.path.abspath(__file__))
@@ -109,11 +113,26 @@ async def shutdown_event():
             logger.error(f"Error closing chat service: {str(e)}")
             logger.error(traceback.format_exc())
 
+def prepare_debug_info(debug_info):
+    """Prepare debug info for JSON serialization by converting DebugStep objects to dictionaries."""
+    if not debug_info:
+        return debug_info
+        
+    # If there's a steps key, ensure all steps are dictionaries, not DebugStep objects
+    if "steps" in debug_info and isinstance(debug_info["steps"], list):
+        # Convert each step to a dictionary if it's not already
+        for i, step in enumerate(debug_info["steps"]):
+            if isinstance(step, DebugStep):
+                # If the step is a DebugStep object, convert it to dict using asdict
+                debug_info["steps"][i] = asdict(step)
+    
+    return debug_info
+
 @app.post("/chat")
 async def chat(
     request: ChatRequest,
     dw_db: Session = Depends(get_dw_db)
-) -> ChatResponse:
+) -> JSONResponse:
     """Process chat messages"""
     try:
         logger.info(f"Received chat request: {request.message}")
@@ -122,51 +141,25 @@ async def chat(
             logger.error("Chat service not initialized")
             raise HTTPException(status_code=503, detail="Chat service not initialized")
         
-        # Get the is_direct_query flag from the request, default to False
-        is_direct_query = request.is_direct_query if hasattr(request, 'is_direct_query') else False
+        # For now, create a simplified response with just the message
+        response = {
+            "message_id": str(uuid.uuid4()),
+            "message": request.message,
+            "content": "This is a simplified response while we debug the issue.",
+            "status": "success"
+        }
         
-        # Use process_chat_stream but collect all the results into a single response
-        response_parts = {}
-        async for chunk in chat_service.process_chat_stream(
-            message=request.message,
-            session_id=request.session_id if hasattr(request, 'session_id') else "default",
-            is_direct_query=is_direct_query,
-            dw_db=dw_db
-        ):
-            # Collect relevant parts of the response
-            if "message_id" in chunk:
-                response_parts["message_id"] = chunk["message_id"]
-            if "content_chunk" in chunk:
-                if "content" not in response_parts:
-                    response_parts["content"] = ""
-                response_parts["content"] += chunk["content_chunk"]
-            if "sql_query" in chunk:
-                response_parts["sql_query"] = chunk["sql_query"]
-            if "visualization" in chunk:
-                response_parts["visualization"] = chunk["visualization"]
-            if "result" in chunk:
-                response_parts["result"] = chunk["result"]
-            if "debug_info" in chunk:
-                response_parts["debug_info"] = chunk["debug_info"]
-        
-        # Ensure required fields are present
-        if "message_id" not in response_parts:
-            response_parts["message_id"] = "generated-id"
-        if "content" not in response_parts:
-            response_parts["content"] = "No content generated"
-        
-        # Add message to response
-        response_parts["message"] = request.message
-        
-        logger.info(f"Chat response generated with {len(response_parts)} parts")
-        
-        # Return the response
-        return response_parts
+        return JSONResponse(content=response)
         
     except Exception as e:
         logger.error(f"Error processing chat request: {str(e)}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+        error_response = {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "status": "error"
+        }
+        return JSONResponse(content=error_response, status_code=500)
 
 @app.post("/chat/stream")
 async def stream_chat(
@@ -185,7 +178,7 @@ async def stream_chat(
             try:
                 # Initial response with message ID
                 message_id = None  # Will be generated by process_chat_stream
-                yield json.dumps({"type": "start"}) + "\n"
+                yield f"data: {json.dumps({'type': 'start'})}\n\n"
                 
                 # Set a flag to indicate this is a direct API call
                 is_direct_query = request.is_direct_query
@@ -204,52 +197,41 @@ async def stream_chat(
                     # If we receive a message_id, store it
                     if "message_id" in chunk:
                         message_id = chunk["message_id"]
-                        yield json.dumps({"type": "message_id", "message_id": message_id}) + "\n"
+                        yield f"data: {json.dumps({'type': 'message_id', 'message_id': message_id})}\n\n"
                         
                     # Handle content start event
                     if "type" in chunk and chunk["type"] == "content_start":
-                        yield json.dumps({"type": "content_start", "message_id": message_id}) + "\n"
+                        yield f"data: {json.dumps({'type': 'content_start', 'message_id': message_id})}\n\n"
                         response_started = True
                         
                     # Stream different parts of the response as they become available
                     if "content_chunk" in chunk:
-                        yield json.dumps({
-                            "type": "content", 
-                            "content": chunk["content_chunk"]  # Keep using "content" in output for frontend compatibility
-                        }) + "\n"
+                        yield f"data: {json.dumps({'type': 'content', 'content': chunk['content_chunk']})}\n\n"
+                    # Also handle the "content" field from ChatService
+                    elif "content" in chunk:
+                        yield f"data: {json.dumps({'type': 'content', 'content': chunk['content']})}\n\n"
                     
                     if "sql_query" in chunk and chunk["sql_query"]:
-                        yield json.dumps({
-                            "type": "sql_query", 
-                            "sql_query": chunk["sql_query"]
-                        }) + "\n"
+                        yield f"data: {json.dumps({'type': 'sql_query', 'sql_query': chunk['sql_query']})}\n\n"
                     
                     if "visualization" in chunk and chunk["visualization"]:
-                        yield json.dumps({
-                            "type": "visualization", 
-                            "visualization": chunk["visualization"]
-                        }) + "\n"
+                        yield f"data: {json.dumps({'type': 'visualization', 'visualization': chunk['visualization']})}\n\n"
                         
                     if "debug_info" in chunk and chunk["debug_info"]:
-                        yield json.dumps({
-                            "type": "debug_info", 
-                            "debug_info": chunk["debug_info"]
-                        }) + "\n"
+                        debug_info = prepare_debug_info(chunk["debug_info"])
+                        yield f"data: {json.dumps({'type': 'debug_info', 'debug_info': debug_info})}\n\n"
                     
                     # Add a small delay to simulate a more natural typing effect
                     await asyncio.sleep(0.05)
                 
                 # Signal that the stream is complete
-                yield json.dumps({"type": "end", "message_id": message_id}) + "\n"
+                yield f"data: {json.dumps({'type': 'end', 'message_id': message_id})}\n\n"
                 
             except Exception as e:
                 logger.error(f"Error in stream generation: {str(e)}")
                 logger.error(traceback.format_exc())
                 # Send error message
-                yield json.dumps({
-                    "type": "error", 
-                    "error": str(e)
-                }) + "\n"
+                yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
         
         return StreamingResponse(
             generate(), 
@@ -257,7 +239,8 @@ async def stream_chat(
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"  # Disable nginx buffering
+                "X-Accel-Buffering": "no",  # Disable nginx buffering
+                "Content-Type": "text/event-stream"  # Ensure correct content type
             }
         )
         
