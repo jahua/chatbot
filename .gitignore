@@ -59,6 +59,9 @@ htmlcov/
 data/
 chroma_data/
 
+# Add dataset directory
+dataset/
+
 # Docker
 docker-compose.override.yml
 

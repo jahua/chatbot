@@ -461,4 +461,94 @@ class DWContextService:
             "has_seasonality": has_seasonality,
             "monthly_average": monthly_avg,
             "monthly_std": monthly_std
-        } 
+        }
+        
+    def get_highest_spending_industry(
+        self,
+        region_id: Optional[int] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """Get the industry with the highest total spending"""
+        try:
+            self.debug_service.start_step("Highest Spending Industry Query", {
+                "region_id": region_id,
+                "start_date": start_date.isoformat() if start_date else None,
+                "end_date": end_date.isoformat() if end_date else None
+            })
+            
+            # Build a query to sum total_spending by industry
+            query = self.dw_db.query(
+                DimIndustry.industry_id,
+                DimIndustry.industry_name,
+                func.sum(FactSpending.total_spending).label('total_industry_spending')
+            ).join(
+                FactSpending,
+                FactSpending.industry_id == DimIndustry.industry_id
+            ).join(
+                DimDate,
+                FactSpending.date_id == DimDate.date_id
+            )
+            
+            # Apply filters if provided
+            if region_id:
+                query = query.filter(FactSpending.region_id == region_id)
+            
+            if start_date and end_date:
+                query = query.filter(
+                    DimDate.date.between(start_date, end_date)
+                )
+            
+            # Group by industry and order by total spending in descending order
+            result = query.group_by(
+                DimIndustry.industry_id, 
+                DimIndustry.industry_name
+            ).order_by(
+                desc('total_industry_spending')
+            ).first()
+            
+            if not result:
+                self.debug_service.add_step_details({
+                    "result": "No spending data found for the given parameters"
+                })
+                self.debug_service.end_step()
+                return {
+                    "found": False,
+                    "message": "No spending data found"
+                }
+            
+            # Format the result
+            highest_spending = {
+                "found": True,
+                "industry_id": result.industry_id,
+                "industry_name": result.industry_name,
+                "total_spending": float(result.total_industry_spending) if result.total_industry_spending else 0
+            }
+            
+            # Get all industries and their spending for comparison
+            all_industries = query.group_by(
+                DimIndustry.industry_id, 
+                DimIndustry.industry_name
+            ).order_by(
+                desc('total_industry_spending')
+            ).limit(10).all()
+            
+            highest_spending["all_top_industries"] = [
+                {
+                    "industry_id": ind.industry_id,
+                    "industry_name": ind.industry_name,
+                    "total_spending": float(ind.total_industry_spending) if ind.total_industry_spending else 0
+                }
+                for ind in all_industries
+            ]
+            
+            self.debug_service.add_step_details({
+                "result": highest_spending
+            })
+            self.debug_service.end_step()
+            
+            return highest_spending
+            
+        except Exception as e:
+            self.debug_service.end_step(error=e)
+            raise 

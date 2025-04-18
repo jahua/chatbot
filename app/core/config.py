@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     LANGCHAIN_PROJECT: str = os.getenv("LANGCHAIN_PROJECT", "default")
     LANGCHAIN_TRACING_V2: bool = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
     
+    # DW Database settings
+    DW_DATABASE_URL: str = "postgresql://postgres:336699@3.76.40.121:5432/trip_dw"
+    DW_POOL_SIZE: int = 5
+    DW_MAX_OVERFLOW: int = 10
+    DW_POOL_TIMEOUT: int = 30
+    DW_POOL_RECYCLE: int = 1800
+    
     @property
     def DATABASE_URL(self) -> str:
         return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"

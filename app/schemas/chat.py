@@ -18,6 +18,7 @@ class ChatResponse(BaseModel):
     visualization: Optional[str] = None
     status: str = "success"
     response: Optional[str] = ""
+    debug_info: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True 

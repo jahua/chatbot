@@ -27,6 +27,11 @@ class DebugService:
         self.steps: List[DebugStep] = []
         self.current_step: Optional[DebugStep] = None
     
+    def start_flow(self) -> None:
+        """Start a new debug flow, clearing any existing steps"""
+        self.clear()
+        logger.debug("Started new debug flow")
+    
     def start_step(self, name: str, details: Optional[Dict[str, Any]] = None) -> None:
         """Start a new step in the RAG flow"""
         if self.current_step:
@@ -104,4 +109,83 @@ class DebugService:
     def clear(self) -> None:
         """Clear all steps and reset the debug service"""
         self.steps = []
-        self.current_step = None 
+        self.current_step = None
+        
+    def get_debug_info_for_response(self) -> Dict[str, Any]:
+        """Get debug information formatted for the response payload"""
+        summary = self.get_flow_summary()
+        
+        # Create a clean debug info object
+        debug_info = {
+            'status': 'success' if summary['failed_steps'] == 0 else 'error',
+            'total_steps': summary['total_steps'],
+            'completed_steps': summary['completed_steps'],
+            'failed_steps': summary['failed_steps'],
+            'total_duration_ms': summary['total_duration_ms'],
+            'steps': []
+        }
+        
+        # Format each step for the response
+        for step in summary['steps']:
+            step_info = {
+                'name': step['name'],
+                'status': step['status'],
+                'duration_ms': step['duration_ms'],
+                'error': step.get('error')
+            }
+            
+            # Include only essential details
+            if step.get('details'):
+                # Filter details to include only what's relevant for debugging
+                filtered_details = {}
+                for key, value in step['details'].items():
+                    # Include SQL queries, result counts, visualization info
+                    if key in ['sql_query', 'result_count', 'visualization_size', 
+                             'error', 'success', 'query', 'pattern', 'type']:
+                        filtered_details[key] = value
+                        
+                step_info['details'] = filtered_details
+                
+            debug_info['steps'].append(step_info)
+            
+        return debug_info
+    
+    def format_debug_for_display(self) -> Dict[str, Any]:
+        """Format debug information for frontend display"""
+        debug_info = self.get_debug_info_for_response()
+        
+        # Add more user-friendly formatting for the frontend
+        status_label = "Success" if debug_info['status'] == 'success' else "Error"
+        
+        formatted_info = {
+            'status': debug_info['status'],
+            'status_label': status_label,
+            'summary': f"{debug_info['completed_steps']}/{debug_info['total_steps']} steps completed successfully in {debug_info['total_duration_ms']:.1f}ms",
+            'steps': []
+        }
+        
+        for step in debug_info['steps']:
+            # Create a user-friendly status indicator
+            if step['status'] == 'completed':
+                status_icon = "✓"
+                status_class = "success"
+            elif step['status'] == 'failed':
+                status_icon = "✗"
+                status_class = "error"
+            else:
+                status_icon = "⏳"
+                status_class = "warning"
+                
+            formatted_step = {
+                'name': step['name'],
+                'status': step['status'],
+                'status_icon': status_icon,
+                'status_class': status_class,
+                'duration': f"{step['duration_ms']:.1f}ms",
+                'error': step.get('error'),
+                'details': step.get('details', {})
+            }
+            
+            formatted_info['steps'].append(formatted_step)
+            
+        return formatted_info 

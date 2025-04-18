@@ -81,6 +81,30 @@ def get_db():
     finally:
         db.close()
 
+# Create DW engine
+dw_engine = create_engine(
+    settings.DW_DATABASE_URL,
+    pool_size=settings.DW_POOL_SIZE,
+    max_overflow=settings.DW_MAX_OVERFLOW,
+    pool_timeout=settings.DW_POOL_TIMEOUT,
+    pool_recycle=settings.DW_POOL_RECYCLE
+)
+
+# Create DW session factory
+DWSessionLocal = sessionmaker(
+    bind=dw_engine,
+    autocommit=False,
+    autoflush=False
+)
+
+def get_dw_db():
+    """Dependency for FastAPI to get a DW database session"""
+    db = DWSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 class DatabaseService:
     """Service for database operations"""
     

@@ -1,11 +1,13 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 import logging
 from app.db.database import get_db, get_dw_db
 from app.db.dw_connection import get_dw_session
 from app.services.chat_service import ChatService
 from app.services.schema_service import SchemaService
+from app.rag.dw_context_service import DWContextService
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.core.config import settings
 from app.db.schema_manager import SchemaManager
@@ -13,6 +15,8 @@ from app.llm.openai_adapter import OpenAIAdapter
 import traceback
 import sys
 import os
+import json
+import asyncio
 
 # Ensure log directory exists
 log_dir = os.path.dirname(os.path.abspath(__file__))
@@ -65,9 +69,13 @@ async def startup_event():
         dw_db = next(get_dw_db())
         logger.info("Database session created")
         
-        # Initialize schema manager
-        schema_manager = SchemaManager()
-        logger.info("Schema manager initialized")
+        # Initialize schema service (fetches live schema)
+        schema_service = SchemaService() 
+        logger.info("Schema service initialized")
+        
+        # Initialize DW context service
+        dw_context_service = DWContextService(dw_db=dw_db)
+        logger.info("DW context service initialized")
         
         # Initialize OpenAI adapter
         llm_adapter = OpenAIAdapter()
@@ -76,7 +84,8 @@ async def startup_event():
         # Initialize chat service
         chat_service = ChatService(
             dw_db=dw_db,
-            schema_manager=schema_manager,
+            schema_service=schema_service,
+            dw_context_service=dw_context_service,
             llm_adapter=llm_adapter
         )
         
@@ -91,8 +100,15 @@ async def shutdown_event():
     """Cleanup on shutdown"""
     global chat_service
     if chat_service:
-        chat_service.close()
-        logger.info("Chat service closed")
+        try:
+            if hasattr(chat_service, 'close'):
+                chat_service.close()
+                logger.info("Chat service closed")
+            else:
+                logger.warning("Chat service does not have a close method")
+        except Exception as e:
+            logger.error(f"Error closing chat service: {str(e)}")
+            logger.error(traceback.format_exc())
 
 @app.post("/chat")
 async def chat(
@@ -107,22 +123,142 @@ async def chat(
             logger.error("Chat service not initialized")
             raise HTTPException(status_code=503, detail="Chat service not initialized")
         
-        # Set a flag to indicate this is a direct API call (not validation)
-        is_direct_query = True
-            
-        # Process the chat request
-        response = await chat_service.process_chat(
+        # Get the is_direct_query flag from the request, default to False
+        is_direct_query = request.is_direct_query if hasattr(request, 'is_direct_query') else False
+        
+        # Use process_chat_stream but collect all the results into a single response
+        response_parts = {}
+        async for chunk in chat_service.process_chat_stream(
             message=request.message,
             is_direct_query=is_direct_query
-        )
+        ):
+            # Collect relevant parts of the response
+            if "message_id" in chunk:
+                response_parts["message_id"] = chunk["message_id"]
+            if "content_chunk" in chunk:
+                if "content" not in response_parts:
+                    response_parts["content"] = ""
+                response_parts["content"] += chunk["content_chunk"]
+            if "sql_query" in chunk:
+                response_parts["sql_query"] = chunk["sql_query"]
+            if "visualization" in chunk:
+                response_parts["visualization"] = chunk["visualization"]
+            if "result" in chunk:
+                response_parts["result"] = chunk["result"]
+            if "debug_info" in chunk:
+                response_parts["debug_info"] = chunk["debug_info"]
         
-        logger.info(f"Chat response generated: {response}")
+        # Ensure required fields are present
+        if "message_id" not in response_parts:
+            response_parts["message_id"] = "generated-id"
+        if "content" not in response_parts:
+            response_parts["content"] = "No content generated"
+        
+        # Add message to response
+        response_parts["message"] = request.message
+        
+        logger.info(f"Chat response generated with {len(response_parts)} parts")
         
         # Return the response
-        return response
+        return response_parts
         
     except Exception as e:
         logger.error(f"Error processing chat request: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat/stream")
+async def stream_chat(
+    request: ChatRequest,
+    dw_db: Session = Depends(get_dw_db)
+):
+    """Process chat messages with streaming response"""
+    try:
+        logger.info(f"Received streaming chat request: {request.message}")
+        
+        if not chat_service:
+            logger.error("Chat service not initialized")
+            raise HTTPException(status_code=503, detail="Chat service not initialized")
+        
+        async def generate():
+            try:
+                # Initial response with message ID
+                message_id = None  # Will be generated by process_chat_stream
+                yield json.dumps({"type": "start"}) + "\n"
+                
+                # Set a flag to indicate this is a direct API call
+                is_direct_query = request.is_direct_query
+                
+                # Start processing the message
+                response_started = False
+                
+                # Process the chat request with streaming
+                async for chunk in chat_service.process_chat_stream(
+                    message=request.message,
+                    is_direct_query=is_direct_query,
+                    message_id=message_id
+                ):
+                    # If we receive a message_id, store it
+                    if "message_id" in chunk:
+                        message_id = chunk["message_id"]
+                        yield json.dumps({"type": "message_id", "message_id": message_id}) + "\n"
+                        
+                    if not response_started and chunk.get("content_chunk"):
+                        yield json.dumps({"type": "content_start", "message_id": message_id}) + "\n"
+                        response_started = True
+                        
+                    # Stream different parts of the response as they become available
+                    if "content_chunk" in chunk:
+                        yield json.dumps({
+                            "type": "content", 
+                            "content": chunk["content_chunk"]
+                        }) + "\n"
+                    
+                    if "sql_query" in chunk and chunk["sql_query"]:
+                        yield json.dumps({
+                            "type": "sql_query", 
+                            "sql_query": chunk["sql_query"]
+                        }) + "\n"
+                    
+                    if "visualization" in chunk and chunk["visualization"]:
+                        yield json.dumps({
+                            "type": "visualization", 
+                            "visualization": chunk["visualization"]
+                        }) + "\n"
+                        
+                    if "debug_info" in chunk and chunk["debug_info"]:
+                        yield json.dumps({
+                            "type": "debug_info", 
+                            "debug_info": chunk["debug_info"]
+                        }) + "\n"
+                    
+                    # Add a small delay to simulate a more natural typing effect
+                    await asyncio.sleep(0.05)
+                
+                # Signal that the stream is complete
+                yield json.dumps({"type": "end", "message_id": message_id}) + "\n"
+                
+            except Exception as e:
+                logger.error(f"Error in stream generation: {str(e)}")
+                logger.error(traceback.format_exc())
+                # Send error message
+                yield json.dumps({
+                    "type": "error", 
+                    "error": str(e)
+                }) + "\n"
+        
+        return StreamingResponse(
+            generate(), 
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"  # Disable nginx buffering
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing streaming chat request: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -5,13 +5,14 @@ from app.schemas.chat import ChatMessageCreate, ChatMessageResponse
 from app.services.chat_service import ChatService
 from app.agents.sql_agent import SQLAgent
 from app.agents.visualization_agent import VisualizationAgent
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import json
 import pandas as pd
 from app.core.langsmith_config import get_traceable_decorator
 import uuid
 from datetime import datetime
 import logging
+from app.services.agent_service import AgentService
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -70,6 +71,36 @@ async def chat_message(
     except Exception as e:
         logger.error(f"Error in chat_message: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/query")
+async def process_query(
+    query: str,
+    region_id: Optional[int] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    agent_service: AgentService = Depends()
+) -> Dict[str, Any]:
+    """Process a query with optional DW context"""
+    return await agent_service.process_query(
+        query,
+        region_id=region_id,
+        start_date=start_date,
+        end_date=end_date
+    )
+
+@router.get("/visitor-trends/{region_id}")
+async def get_visitor_trends(
+    region_id: int,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    agent_service: AgentService = Depends()
+) -> Dict[str, Any]:
+    """Get visitor trends for a region"""
+    return await agent_service.analyze_visitor_trends(
+        region_id,
+        start_date=start_date,
+        end_date=end_date
+    )
 
 def _determine_visualization_type(data: list, query: str) -> str:
     """Determine the best visualization type based on data and query"""

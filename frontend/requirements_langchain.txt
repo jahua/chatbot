@@ -1,0 +1,11 @@
+langchain>=0.0.267
+langchain-openai>=0.0.2
+openai>=0.27.8
+langchain-community>=0.0.9
+langchain-core>=0.1.5
+SQLAlchemy>=2.0.0
+tiktoken>=0.4.0
+pandas>=1.5.3
+numpy>=1.24.3
+streamlit>=1.24.0
+python-dotenv>=1.0.0 
