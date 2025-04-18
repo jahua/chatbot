@@ -44,6 +44,7 @@ from app.services.tourism_region_service import TourismRegionService
 from app.services.sql_generation_service import SQLGenerationService
 from app.services.visualization_service import VisualizationService
 from app.services.schema_service import SchemaService
+from app.services.response_generation_service import ResponseGenerationService
 # Import VisitorAnalysisService if it exists
 # from .visitor_analysis_service import VisitorAnalysisService
 
@@ -75,6 +76,7 @@ class ChatService:
         # Initialize modular services for LangChain-style flow
         self.sql_generation_service = SQLGenerationService(llm_adapter=self.llm_adapter, debug_service=self.debug_service)
         self.visualization_service = VisualizationService(self.debug_service)
+        self.response_generation_service = ResponseGenerationService(llm_adapter=self.llm_adapter, debug_service=self.debug_service)
         
         # Initialize other supporting services
         self.tourism_region_service = TourismRegionService()
@@ -133,16 +135,12 @@ class ChatService:
             # --- Step: Context Retrieval ---
             current_step_name = "context_retrieval"
             self.debug_service.start_step(current_step_name)
-            try:
-                schema_context, dw_context = await self._get_context(message, query_type == "natural_language", dw_db)
-                self.debug_service.end_step(current_step_name, success=True, details={
-                    "schema_context_retrieved": schema_context is not None,
-                    "schema_length": len(schema_context) if schema_context else 0,
-                    "dw_context_keys": list(dw_context.keys()) if dw_context else []
-                })
-            except Exception as step_e:
-                self.debug_service.end_step(current_step_name, success=False, error=str(step_e))
-                raise
+            schema_context, dw_context = await self._get_context(message, query_type == "natural_language", dw_db)
+            self.debug_service.end_step(current_step_name, success=True, details={
+                "schema_context_retrieved": schema_context is not None,
+                "schema_length": len(schema_context) if schema_context else 0,
+                "dw_context_keys": list(dw_context.keys()) if dw_context else []
+            })
 
             # --- Main Logic Branching ---
             if query_type == "sql_direct":
@@ -236,10 +234,14 @@ class ChatService:
                 self.debug_service.start_step(current_step_name)
                 response = ""
                 try:
-                    # Simplified response generation
-                    response = f"Found {len(processed_results)} results for your query about busy periods." # Simplified
+                    # Replace placeholder with actual LLM call
+                    # response = f"Found {len(processed_results)} results for your query about busy periods." # Simplified
                     # TODO: Integrate real ResponseGenerationService call
-                    # response = await self.response_generation_service.generate_response(...)
+                    response = await self.response_generation_service.generate_response(
+                        query=message,
+                        sql_query=sql_query,
+                        sql_results=processed_results
+                    )
                     self.debug_service.update_step(current_step_name, details={"response_generated": True, "response_length": len(response)})
                     self.debug_service.end_step(current_step_name, success=True)
                 except Exception as step_e:
@@ -641,48 +643,47 @@ class ChatService:
         """Retrieve database schema context and data warehouse insights context"""
         schema_context = None
         dw_context = None
+        current_step_name = "context_retrieval"
         
         try:
             # Get schema context from SchemaService
+            self.debug_service.start_step(current_step_name)
+            schema_context = None
+            dw_context = None
             try:
-                logger.info("Fetching schema context from SchemaService")
-                schema_context = await self.schema_service.get_schema_context(dw_db)
-                if not schema_context:
-                    logger.warning("Schema context is empty, using fallback schema")
-                    schema_context = self._get_fallback_schema_context()
-            except Exception as schema_e:
-                logger.error(f"Error retrieving schema context: {str(schema_e)}")
-                logger.error(traceback.format_exc())
-                # Use fallback schema instead of returning None
-                schema_context = self._get_fallback_schema_context()
-            
-            # Get data warehouse context from DWContextService
-            try:
-                logger.info("Fetching DW context from DWContextService")
-                
-                # Create a temporary DWContextService instance with the current db session if not provided
-                if self.dw_context_service is None:
-                    temp_dw_context_service = DWContextService(dw_db)
-                    dw_context = await temp_dw_context_service.get_dw_context(message)
+                # Only get live context if it's a natural language query
+                if is_natural_language:
+                    # Corrected call: removed dw_db argument
+                    schema_context = await self.schema_service.get_schema_context()
+                    dw_context = await self.dw_context_service.get_dw_context() if self.dw_context_service else None
+                    
+                    # Fallback mechanism if live retrieval fails
+                    if not schema_context:
+                        logger.warning("Live schema context retrieval failed, using fallback.")
+                        schema_context = self._get_fallback_schema_context()
+                    if not dw_context:
+                        logger.warning("DW context retrieval failed, using fallback.")
+                        dw_context = self._get_fallback_dw_context()
                 else:
-                    # If we have a service instance but need to use a different session
-                    # We'll create a temporary one with the current session
-                    if hasattr(self.dw_context_service, 'dw_db') and self.dw_context_service.dw_db != dw_db:
-                        temp_dw_context_service = DWContextService(dw_db)
-                        dw_context = await temp_dw_context_service.get_dw_context(message)
-                    else:
-                        dw_context = await self.dw_context_service.get_dw_context(message)
-                
-                if not dw_context:
-                    logger.warning("DW context is empty, using fallback context")
-                    dw_context = self._get_fallback_dw_context()
-            except Exception as dw_e:
-                logger.error(f"Error retrieving DW context: {str(dw_e)}")
-                logger.error(traceback.format_exc())
-                # Use fallback DW context
+                    # For direct SQL, we might not need full context, but log it
+                    logger.info("Skipping context retrieval for direct SQL query.")
+
+                self.debug_service.end_step(current_step_name, success=True, details={
+                    "schema_context_retrieved": schema_context is not None,
+                    "schema_length": len(schema_context) if schema_context else 0,
+                    "dw_context_keys": list(dw_context.keys()) if dw_context else []
+                })
+                return schema_context, dw_context # Return tuple
+            except Exception as step_e:
+                logger.error(f"Error retrieving context: {str(step_e)}", exc_info=True)
+                # Fallback if ANY error occurs during context retrieval
+                logger.warning("Using fallback context due to error during retrieval.")
+                schema_context = self._get_fallback_schema_context()
                 dw_context = self._get_fallback_dw_context()
-            
-            return schema_context, dw_context
+                self.debug_service.end_step(current_step_name, success=False, error=f"Error retrieving context: {str(step_e)}. Used fallback.")
+                return schema_context, dw_context # Return fallback tuple
+
+
         except Exception as e:
             logger.error(f"General error in _get_context: {str(e)}")
             logger.error(traceback.format_exc())
@@ -694,53 +695,61 @@ class ChatService:
             return schema_context, dw_context
     
     def _get_fallback_schema_context(self) -> str:
-        """Provide a minimal fallback schema context when the actual schema can't be retrieved"""
-        logger.info("Using fallback schema context")
-        return """
-        Table: dw.fact_visitor
-        Columns:
-          - date_id (int): Foreign key to dw.dim_date
-          - region_id (int): Foreign key to dw.dim_region
-          - swiss_tourists (int): Number of Swiss tourists
-          - foreign_tourists (int): Number of foreign tourists
-          - swiss_locals (int): Number of Swiss locals
-          - foreign_workers (int): Number of foreign workers 
-          - swiss_commuters (int): Number of Swiss commuters
-          - total_visitors (int): Total number of visitors
-        
-        Table: dw.fact_spending
-        Columns:
-          - date_id (int): Foreign key to dw.dim_date
-          - region_id (int): Foreign key to dw.dim_region
-          - industry_id (int): Foreign key to dw.dim_industry
-          - amount (numeric): Total spending amount
-          - transaction_count (int): Number of transactions
-        
-        Table: dw.dim_date
-        Columns:
-          - date_id (int): Primary key
-          - date (date): Actual date
-          - day (int): Day of month
-          - month (int): Month number
-          - year (int): Year
-          - day_of_week (int): Day of week (0-6)
-          - is_weekend (boolean): Whether the date is a weekend
-          - quarter (int): Quarter (1-4)
-          - season (text): Season name (Spring, Summer, Fall, Winter)
-        
-        Table: dw.dim_region
-        Columns:
-          - region_id (int): Primary key
-          - region_name (text): Name of the region
-          - canton (text): Canton name
-          - is_urban (boolean): Whether the region is urban
-        
-        Table: dw.dim_industry
-        Columns:
-          - industry_id (int): Primary key
-          - industry_name (text): Name of the industry
-          - category (text): Industry category
-        """
+        """Returns a predefined fallback schema string if live retrieval fails."""
+        # TODO: Keep this updated or load from a static file
+        return '''
+Schema: dw
+Tables:
+  dw.fact_visitor (
+    visitor_id bigint PRIMARY KEY, -- Unique identifier for each visitor record
+    date_id bigint, -- Foreign key to dim_date
+    region_id bigint, -- Foreign key to dim_region
+    industry_id bigint, -- Foreign key to dim_industry
+    swiss_tourists bigint, -- Number of Swiss tourists
+    foreign_tourists bigint, -- Number of foreign tourists
+    swiss_locals bigint, -- Number of Swiss locals
+    foreign_workers bigint, -- Number of foreign workers
+    swiss_commuters bigint, -- Number of Swiss commuters
+    total_visitors bigint -- Total number of visitors (sum of all types)
+  )
+  dw.fact_spending (
+    spending_id bigint PRIMARY KEY, -- Unique identifier for spending record
+    date_id bigint, -- Foreign key to dim_date
+    region_id bigint, -- Foreign key to dim_region
+    industry_id bigint, -- Foreign key to dim_industry
+    category_id bigint, -- Foreign key to dim_spending_category
+    total_spending decimal(18, 2), -- Total spending amount
+    transaction_count bigint -- Number of transactions
+  )
+  dw.dim_date (
+    date_id bigint PRIMARY KEY, -- Unique date identifier
+    full_date date, -- Corrected column name: The actual date value
+    year integer, -- Year (e.g., 2023)
+    month integer, -- Month (1-12)
+    day integer, -- Day of the month (1-31)
+    quarter integer, -- Quarter (1-4)
+    week_of_year integer, -- Week number (1-53)
+    day_of_week integer, -- Day of the week (0=Sunday, 6=Saturday)
+    is_weekend boolean, -- True if weekend, False otherwise
+    season varchar(10) -- Season (e.g., 'Spring', 'Summer', 'Autumn', 'Winter')
+  )
+  dw.dim_region (
+    region_id bigint PRIMARY KEY, -- Unique region identifier
+    region_name varchar(255), -- Name of the region (e.g., 'Zurich', 'Geneva')
+    canton varchar(50), -- Swiss canton
+    country varchar(50) -- Country (usually Switzerland)
+  )
+  dw.dim_industry (
+    industry_id bigint PRIMARY KEY, -- Unique industry identifier
+    industry_name varchar(255), -- Name of the industry (e.g., 'Hospitality', 'Retail')
+    sector varchar(100) -- Broader economic sector
+  )
+  dw.dim_spending_category (
+    category_id bigint PRIMARY KEY, -- Unique spending category identifier
+    category_name varchar(255), -- Name of the category (e.g., 'Accommodation', 'Food & Beverage')
+    parent_category_id bigint -- Foreign key for hierarchical categories (optional)
+  )
+'''
     
     def _get_fallback_dw_context(self) -> Dict[str, Any]:
         """Provide fallback DW context when the actual context can't be retrieved"""
