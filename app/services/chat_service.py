@@ -488,139 +488,50 @@ class ChatService:
 
     def _get_visualization(self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
         """Generate visualization based on query results, handling potential errors."""
-        visualization_data = None
-        vis_type = "none"
-        
         try:
             if not results or not self.visualization_service:
                 logger.info("No results or visualization service available to generate visualization.")
                 return None
 
-            query_lower = query.lower()
+            # Directly use the main visualization service method with built-in error handling
+            visualization_data = self.visualization_service.create_visualization(results, query)
+            if visualization_data:
+                logger.info(f"Successfully generated visualization of type: {visualization_data.get('chart_type', 'unknown')}")
+                return visualization_data
+            else:
+                logger.warning("Visualization service returned None")
+                return None
             
-            # Check for time-related queries for line charts
-            if any(term in query_lower for term in ["trend", "over time", "by week", "by month", "by year"]):
-                logger.info("Attempting to create line chart for time-series data")
-                try:
-                    visualization_data = self.visualization_service.create_line_chart(results, query)
-                    vis_type = "image"
-                except Exception as viz_err:
-                    logger.error(f"Error in create_line_chart: {str(viz_err)}")
-            
-            # Check for visitor/tourism related queries for bar charts
-            elif any(term in query_lower for term in ["visitor", "tourist", "busiest", "traffic"]):
-                logger.info("Attempting to create bar chart for visitor data")
-                try:
-                    visualization_data = self.visualization_service.create_bar_chart(results, query)
-                    vis_type = "image"
-                except Exception as viz_err:
-                    logger.error(f"Error in create_bar_chart: {str(viz_err)}")
-            
-            # Check for spending/revenue/distribution queries for pie charts
-            elif any(term in query_lower for term in ["spending", "revenue", "share", "distribution", "breakdown", "percent", "industry"]):
-                logger.info("Attempting to create pie chart for spending/distribution data")
-                try:
-                    visualization_data = self.visualization_service.create_pie_chart(results, query)
-                    vis_type = "image"
-                except Exception as viz_err:
-                    logger.error(f"Error in create_pie_chart: {str(viz_err)}")
-            
-            # Check for region/geographic queries
-            elif any(term in query_lower for term in ["region", "location", "area", "geography", "map", "spatial"]):
-                logger.info("Attempting to create geo chart for region data")
-                try:
-                    visualization_data = self.visualization_service.create_geo_chart(results, query)
-                    vis_type = "image"
-                except Exception as viz_err:
-                    logger.error(f"Error in create_geo_chart: {str(viz_err)}")
-            
-            # If no specific chart type was successful or applicable, try the default visualization
-            if visualization_data is None:
-                logger.info("Attempting to create default visualization")
-                try:
-                    visualization_data = self.visualization_service.create_default_visualization(results, query)
-                    vis_type = "image"
-                except Exception as viz_err:
-                    logger.error(f"Error in default visualization: {str(viz_err)}")
-                    
-                    # If visualization fails, use table as fallback
-                    if results:
-                        logger.info("Falling back to table visualization")
-                        vis_type = "table"
-                        visualization_data = results
-            
-            # Format the visualization output according to the frontend's expectations
-            if visualization_data is not None:
-                if vis_type == "image":
-                    return {
-                        "type": "image",
-                        "data": visualization_data  # Base64 string
-                    }
-                elif vis_type == "table":
-                    return {
-                        "type": "table",
-                        "data": visualization_data  # List of dictionaries
-                    }
-                    
         except Exception as e:
             logger.error(f"Unexpected error during visualization generation: {str(e)}")
             logger.error(traceback.format_exc())
             
-            # Recovery attempts for visualization errors
-            return self._attempt_recovery_visualization(results, query)
-        
-        return None
-        
-    def _attempt_recovery_visualization(self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
-        """Attempt to recover from visualization errors with fallback options."""
-        if not results or not self.visualization_service:
-            logger.info("No results or visualization service available for recovery")
-            return None
-            
-        # Try bar chart for visitor data
-        if "visitor" in query.lower() or "tourist" in query.lower():
+            # Try one more time with simplified data
             try:
-                visualization_data = self.visualization_service.create_bar_chart(results)
-                if visualization_data:
-                    return {
-                        "type": "image",
-                        "data": visualization_data
-                    }
-            except Exception as viz_err:
-                logger.error(f"Recovery bar chart failed: {str(viz_err)}")
+                # Simplify results - take only the first 20 rows to reduce complexity
+                simplified_results = results[:20] if len(results) > 20 else results
+                
+                # Strip any complex nested data that might cause issues
+                for row in simplified_results:
+                    for key in list(row.keys()):
+                        if isinstance(row[key], (dict, list)):
+                            row[key] = str(row[key])
+                
+                # Use the fallback visualization method directly
+                return self.visualization_service._create_fallback_visualization(
+                    simplified_results, 
+                    query, 
+                    f"Error in primary visualization: {str(e)}"
+                )
+            except Exception as fallback_e:
+                logger.error(f"Fallback visualization also failed: {str(fallback_e)}")
+                
+                # Last resort - return results as a table
+                return {
+                    "type": "table",
+                    "data": results[:10]  # Limit to 10 rows for performance
+                }
         
-        # Try pie chart for spending/industry data
-        elif "spending" in query.lower() or "industry" in query.lower():
-            try:
-                visualization_data = self.visualization_service.create_pie_chart(results)
-                if visualization_data:
-                    return {
-                        "type": "image",
-                        "data": visualization_data
-                    }
-            except Exception as viz_err:
-                logger.error(f"Recovery pie chart failed: {str(viz_err)}")
-        
-        # Final fallback - default visualization
-        else:
-            try:
-                if hasattr(self.visualization_service, 'create_default_visualization'):
-                    visualization_data = self.visualization_service.create_default_visualization(results)
-                    if visualization_data:
-                        return {
-                            "type": "image",
-                            "data": visualization_data
-                        }
-            except Exception as viz_err:
-                logger.error(f"Recovery default visualization failed: {str(viz_err)}")
-        
-        # If all else fails, return a table
-        if results:
-            return {
-                "type": "table",
-                "data": results
-            }
-            
         return None
 
     def _determine_query_type(self, message: str, is_direct_query: bool) -> str:
@@ -655,7 +566,7 @@ class ChatService:
                 if is_natural_language:
                     # Corrected call: removed dw_db argument
                     schema_context = await self.schema_service.get_schema_context()
-                    dw_context = await self.dw_context_service.get_dw_context() if self.dw_context_service else None
+                    dw_context = await self.dw_context_service.get_dw_context(query=message) if self.dw_context_service else None
                     
                     # Fallback mechanism if live retrieval fails
                     if not schema_context:

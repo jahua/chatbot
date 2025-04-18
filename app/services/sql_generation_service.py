@@ -48,65 +48,152 @@ class SQLGenerationService:
         self.debug_service = debug_service
         logger.info("SQLGenerationService initialized successfully")
     
-    async def generate_query(self, user_question: str, live_schema_string: str, dw_context: Dict[str, Any]) -> str:
-        """Generate SQL query using LLM based on natural language query and database context."""
+    async def generate_query(self, user_question: str, live_schema_string: str, dw_context: dict = None) -> str:
+        """
+        Generate a SQL query based on the user's question.
+        
+        Args:
+            user_question: The user's natural language question
+            live_schema_string: The database schema information
+            dw_context: Optional context about the data warehouse
+            
+        Returns:
+            A SQL query string
+        """
         if self.debug_service:
-            self.debug_service.start_step("sql_generation_llm", {
+            self.debug_service.start_step("sql_generation_llm", details={
                 "query_text": user_question,
-                "schema_context_provided": bool(live_schema_string),
-                "dw_context_provided": bool(dw_context)
+                "schema_context_provided": live_schema_string is not None,
+                "dw_context_provided": dw_context is not None
             })
         
-        sql_query = ""
         try:
-            if not live_schema_string:
-                raise ValueError("Live schema context is missing or empty.")
-
-            # Prepare the context string for the prompt
-            context_for_prompt = f"\n--- LIVE SCHEMA (dw) ---\n{live_schema_string}\n"
-            context_for_prompt += f"\n--- DW CONTEXT ---\n{json.dumps(dw_context, indent=2)}\n"
-
-            # Prepare messages for the LLM (Now formatting as a single string)
-            # Combine system prompt, context, and user question into a single prompt string
-            full_prompt_string = f"{SQL_GENERATION_SYSTEM_PROMPT}\n\n{context_for_prompt}\n\nUser Question: {user_question}\n\nGenerate the PostgreSQL query:"
-
-            # Call the LLM adapter using agenerate_text
-            # Assuming llm_adapter has a method like 'agenerate_text'
-            generated_text = await self.llm_adapter.agenerate_text(full_prompt_string)
+            # Develop prompt for OpenAI with schema and user question
+            prompt = self._build_sql_prompt(user_question, live_schema_string, dw_context)
             
-            if not generated_text:
-                raise ValueError("LLM failed to generate SQL query text.")
-
-            # Basic extraction/cleaning (might need refinement)
-            # Look for SELECT or WITH statement, potentially strip markdown
-            match = re.search(r'(WITH|SELECT).*;', generated_text, re.IGNORECASE | re.DOTALL)
-            if match:
-                sql_query = match.group(0).strip()
-                # Remove potential markdown backticks
-                sql_query = sql_query.replace('```sql', '').replace('```', '').strip()
-            else:
-                 # Fallback: assume the whole response might be the query if simple extraction fails
-                 sql_query = generated_text.strip().replace('```sql', '').replace('```', '').strip()
-                 if not (sql_query.upper().startswith("SELECT") or sql_query.upper().startswith("WITH")):
-                      raise ValueError(f"LLM generated invalid SQL start: {sql_query[:100]}...")
-
+            # Get raw response from OpenAI
+            raw_response = await self.llm_adapter.agenerate_text(prompt)
+            
+            # Log raw output for debugging
             if self.debug_service:
                 self.debug_service.add_step_details({
-                    "llm_raw_output": generated_text,
+                    "llm_raw_output": raw_response
+                })
+            
+            # Extract SQL query from response
+            sql_query = self._extract_sql_from_response(raw_response)
+            
+            # Fix common SQL errors
+            sql_query = self._fix_common_sql_errors(sql_query)
+            
+            # Log extracted SQL
+            if self.debug_service:
+                self.debug_service.add_step_details({
                     "extracted_sql": sql_query
                 })
             
+            # Validate with schema if possible
+            # if live_schema_string:
+            #     sql_query = self._validate_and_fix_sql(sql_query, live_schema_string)
+            
             logger.info(f"LLM generated SQL query: {sql_query}")
-            return sql_query
-
-        except Exception as e:
-            logger.error(f"Error generating SQL query via LLM: {str(e)}", exc_info=True)
+            
             if self.debug_service:
-                self.debug_service.add_step_details({"error": str(e)})
-                # Mark step as failed only if we re-raise or return an error indicator
-                # self.debug_service.end_step(error=e) # Keep step open if we return empty/fallback
-            # Depending on desired behavior, either re-raise, return None, or return empty string
-            raise # Re-raise the exception to be caught by ChatService
+                self.debug_service.end_step("sql_generation_llm", success=True)
+            
+            return sql_query
+            
+        except Exception as e:
+            logger.error(f"Error generating SQL query: {str(e)}")
+            if self.debug_service:
+                self.debug_service.end_step("sql_generation_llm", success=False, error=str(e))
+            raise
+
+    def _fix_common_sql_errors(self, sql_query: str) -> str:
+        """Fix common SQL errors that appear in generated queries"""
+        if not sql_query:
+            return sql_query
+            
+        # Fix for the week_of_year column issue
+        fixed_query = sql_query
+        
+        # Replace d.week_of_year with EXTRACT(WEEK FROM d.full_date)
+        if "d.week_of_year" in fixed_query:
+            logger.info("Fixing d.week_of_year reference")
+            fixed_query = fixed_query.replace("d.week_of_year", "EXTRACT(WEEK FROM d.full_date)::INTEGER AS week_of_year")
+            
+            # Make sure any GROUP BY d.week_of_year is also updated
+            fixed_query = fixed_query.replace("GROUP BY d.week_of_year", "GROUP BY EXTRACT(WEEK FROM d.full_date)")
+            
+            # Make sure any ORDER BY d.week_of_year is also updated
+            fixed_query = fixed_query.replace("ORDER BY d.week_of_year", "ORDER BY EXTRACT(WEEK FROM d.full_date)")
+            
+        # Replace any other table aliases with proper column references
+        if "spring_visitors" in fixed_query:
+            # Fix common issue with CTE column references 
+            if "week_of_year, total_visitors" in fixed_query:
+                fixed_query = fixed_query.replace(
+                    "week_of_year, total_visitors", 
+                    "spring_visitors.week_of_year, spring_visitors.total_visitors"
+                )
+        
+        # Add more fixes for common errors as they are encountered
+        
+        return fixed_query
+
+    def _build_sql_prompt(self, user_question: str, live_schema_string: str, dw_context: dict = None) -> str:
+        """
+        Build the prompt for SQL generation
+        
+        Args:
+            user_question: The user's question
+            live_schema_string: The database schema information
+            dw_context: Additional context information
+            
+        Returns:
+            A formatted prompt string
+        """
+        # Start with the system prompt
+        full_prompt = SQL_GENERATION_SYSTEM_PROMPT
+        
+        # Add schema information
+        full_prompt += f"\n\n--- LIVE SCHEMA (dw) ---\n\n{live_schema_string}\n\n"
+        
+        # Add DW context if available
+        if dw_context:
+            full_prompt += f"--- DW CONTEXT ---\n{json.dumps(dw_context, indent=2)}\n\n"
+        
+        # Add the user question
+        full_prompt += f"\nUser Question: {user_question}\n\nGenerate the PostgreSQL query:"
+        
+        return full_prompt
+    
+    def _extract_sql_from_response(self, response: str) -> str:
+        """
+        Extract SQL query from the LLM response
+        
+        Args:
+            response: The raw response from the LLM
+            
+        Returns:
+            The extracted SQL query
+        """
+        if not response:
+            return ""
+            
+        # Try to extract SQL from markdown code blocks
+        sql_match = re.search(r'```(?:sql)?(.*?)```', response, re.DOTALL)
+        if sql_match:
+            sql_query = sql_match.group(1).strip()
+            return sql_query
+        
+        # If no code block found, look for SELECT or WITH statements
+        query_match = re.search(r'(WITH|SELECT).*?;', response, re.DOTALL | re.IGNORECASE)
+        if query_match:
+            return query_match.group(0).strip()
+        
+        # If all else fails, just return the response
+        return response.strip()
 
     # Removed _extract_query_intent, _generate_busiest_period_query,
     # _generate_spending_query, _generate_visitor_query, _generate_general_query
