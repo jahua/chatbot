@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum, auto
 import re
 from datetime import datetime, timedelta
@@ -22,6 +22,8 @@ class QueryIntent(Enum):
     SPENDING_ANALYSIS = "spending_analysis"
     TREND_ANALYSIS = "trend_analysis"
     CORRELATION_ANALYSIS = "correlation_analysis"
+    DEMOGRAPHIC_ANALYSIS = "demographic_analysis"
+    UNKNOWN = "unknown"
     
     def __str__(self):
         return self.value
@@ -65,6 +67,53 @@ class IntentParser:
             "time_comparison": r"compare.+between",
             "trend": r"(trend|pattern|change)",
             "peak": r"(peak|busiest|most)"
+        }
+        
+        self.intent_patterns: Dict[QueryIntent, List[Tuple[str, float]]] = {
+            QueryIntent.VISITOR_COUNT: [
+                (r"\b(how many|number of|count of|total)\b.*\b(visitors?|tourists?|people)\b", 0.8),
+                (r"\b(visitor|tourist)\b.*\b(statistics|numbers|figures)\b", 0.7),
+                (r"\b(swiss|foreign)\b.*\b(tourists?|visitors?)\b", 0.9)
+            ],
+            QueryIntent.SPENDING_ANALYSIS: [
+                (r"\b(spending|expenditure|amount|money)\b", 0.7),
+                (r"\b(industry|sector)\b.*\b(spending|revenue|sales)\b", 0.9),
+                (r"\b(highest|most|top)\b.*\b(spending|expenditure)\b", 0.8),
+                (r"\b(transaction|purchase)\b.*\b(amount|value|size)\b", 0.7)
+            ],
+            QueryIntent.PEAK_PERIOD: [
+                (r"\b(busiest|peak|highest)\b.*\b(time|period|season|week|month)\b", 0.9),
+                (r"\b(when|which)\b.*\b(most|highest)\b.*\b(visitors?|tourists?)\b", 0.8),
+                (r"\b(popular|busy)\b.*\b(times?|periods?|seasons?)\b", 0.7)
+            ],
+            QueryIntent.DEMOGRAPHIC_ANALYSIS: [
+                (r"\b(demographics?|population)\b.*\b(breakdown|distribution|profile)\b", 0.9),
+                (r"\b(age|gender)\b.*\b(groups?|distribution|ratio)\b", 0.8),
+                (r"\b(who|what type of people)\b.*\b(visits?|comes?)\b", 0.7)
+            ]
+        }
+        
+        self.intent_keywords: Dict[QueryIntent, Dict[str, float]] = {
+            QueryIntent.VISITOR_COUNT: {
+                "visitor": 0.6, "tourist": 0.6, "people": 0.4,
+                "count": 0.5, "number": 0.5, "total": 0.5,
+                "swiss": 0.3, "foreign": 0.3
+            },
+            QueryIntent.SPENDING_ANALYSIS: {
+                "spending": 0.7, "expenditure": 0.7, "amount": 0.6,
+                "industry": 0.5, "sector": 0.5, "revenue": 0.6,
+                "transaction": 0.5, "purchase": 0.5
+            },
+            QueryIntent.PEAK_PERIOD: {
+                "busiest": 0.7, "peak": 0.7, "highest": 0.6,
+                "period": 0.5, "season": 0.5, "week": 0.4,
+                "month": 0.4, "time": 0.3
+            },
+            QueryIntent.DEMOGRAPHIC_ANALYSIS: {
+                "demographic": 0.8, "population": 0.7,
+                "age": 0.6, "gender": 0.6, "group": 0.4,
+                "distribution": 0.5, "profile": 0.5
+            }
         }
     
     def parse_query_intent(self, message: str) -> Dict[str, Any]:
@@ -315,3 +364,131 @@ class IntentParser:
             components["limit_clause"] = "LIMIT 10"
             
         return components 
+
+    def detect_intent(self, query: str) -> Tuple[QueryIntent, float]:
+        """
+        Detect the intent of a query using pattern matching and keyword analysis
+        
+        Args:
+            query: The natural language query string
+            
+        Returns:
+            Tuple of (QueryIntent, confidence_score)
+        """
+        query = query.lower().strip()
+        
+        # Check pattern matches first
+        pattern_scores: Dict[QueryIntent, float] = {}
+        for intent, patterns in self.intent_patterns.items():
+            max_pattern_score = 0.0
+            for pattern, score in patterns:
+                if re.search(pattern, query):
+                    max_pattern_score = max(max_pattern_score, score)
+            if max_pattern_score > 0:
+                pattern_scores[intent] = max_pattern_score
+        
+        # If we have strong pattern matches, use the highest scoring one
+        if pattern_scores:
+            best_intent = max(pattern_scores.items(), key=lambda x: x[1])
+            if best_intent[1] >= 0.8:
+                return best_intent
+        
+        # Fall back to keyword analysis
+        keyword_scores: Dict[QueryIntent, float] = {}
+        query_words = set(query.split())
+        
+        for intent, keywords in self.intent_keywords.items():
+            score = 0.0
+            matches = 0
+            for word, weight in keywords.items():
+                if word in query_words:
+                    score += weight
+                    matches += 1
+            if matches > 0:
+                # Normalize score by number of matches
+                keyword_scores[intent] = score / matches
+        
+        # Combine pattern and keyword scores
+        combined_scores: Dict[QueryIntent, float] = {}
+        all_intents = set(pattern_scores.keys()) | set(keyword_scores.keys())
+        
+        for intent in all_intents:
+            pattern_score = pattern_scores.get(intent, 0.0)
+            keyword_score = keyword_scores.get(intent, 0.0)
+            # Weight pattern matches more heavily
+            combined_scores[intent] = (pattern_score * 0.7) + (keyword_score * 0.3)
+        
+        if combined_scores:
+            best_intent = max(combined_scores.items(), key=lambda x: x[1])
+            if best_intent[1] >= 0.5:
+                return best_intent
+        
+        return (QueryIntent.UNKNOWN, 0.0)
+
+    def get_temporal_context(self, query: str) -> Dict[str, str]:
+        """Extract temporal context from the query"""
+        temporal_context = {}
+        
+        # Extract season
+        seasons = {"spring": r"\b(spring)\b", 
+                  "summer": r"\b(summer)\b",
+                  "fall": r"\b(fall|autumn)\b", 
+                  "winter": r"\b(winter)\b"}
+        
+        for season, pattern in seasons.items():
+            if re.search(pattern, query.lower()):
+                temporal_context["season"] = season
+                
+        # Extract year
+        year_match = re.search(r"\b(20\d{2})\b", query)
+        if year_match:
+            temporal_context["year"] = year_match.group(1)
+            
+        # Extract month
+        months = {
+            "january": 1, "february": 2, "march": 3, "april": 4,
+            "may": 5, "june": 6, "july": 7, "august": 8,
+            "september": 9, "october": 10, "november": 11, "december": 12
+        }
+        
+        for month_name, month_num in months.items():
+            if re.search(fr"\b{month_name}\b", query.lower()):
+                temporal_context["month"] = str(month_num)
+                
+        return temporal_context
+
+    def get_geographic_context(self, query: str) -> Optional[str]:
+        """Extract geographic context from the query"""
+        # Add region extraction logic based on your available regions
+        regions = ["zurich", "geneva", "bern", "basel", "lucerne"]
+        for region in regions:
+            if re.search(fr"\b{region}\b", query.lower()):
+                return region
+        return None
+
+    def get_demographic_context(self, query: str) -> Dict[str, str]:
+        """Extract demographic context from the query"""
+        demographic_context = {}
+        
+        # Age groups
+        age_patterns = {
+            "young": r"\b(young|youth|teenagers?)\b",
+            "adult": r"\b(adults?|middle-aged)\b",
+            "senior": r"\b(seniors?|elderly|older)\b"
+        }
+        
+        for age_group, pattern in age_patterns.items():
+            if re.search(pattern, query.lower()):
+                demographic_context["age_group"] = age_group
+                
+        # Gender
+        gender_patterns = {
+            "male": r"\b(males?|men)\b",
+            "female": r"\b(females?|women)\b"
+        }
+        
+        for gender, pattern in gender_patterns.items():
+            if re.search(pattern, query.lower()):
+                demographic_context["gender"] = gender
+                
+        return demographic_context 

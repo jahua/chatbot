@@ -25,4 +25,5 @@ bcrypt==4.1.2
 httpx==0.28.1
 vanna==0.0.26
 geopandas==0.14.2
-shapely==2.0.2 
+shapely==2.0.2
+altair==5.2.0 

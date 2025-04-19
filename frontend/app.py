@@ -19,6 +19,13 @@ import sseclient  # For server-sent events
 import sys  # <-- Add import for flush
 import config  # Import configuration
 
+# Add the project root to the Python path
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Import the visualization service
+from app.services.streamlit_visualization_service import StreamlitVisualizationService
+
 # Set page config first thing
 st.set_page_config(
     layout="wide",
@@ -260,27 +267,27 @@ def process_query(query: str, use_streaming: bool = True):
 def process_streaming_query(query: str, request_id: str):
     """Process a query with streaming and update chat interface incrementally."""
     try:
-        # Initialize assistant message
-        assistant_placeholder = st.empty()
-        with assistant_placeholder.chat_message("assistant"):
-            st.markdown("🤖 Analyzing your query...")
-
-        # Initialize containers for different components
-        content_container = st.empty()
-        sql_container = st.empty()
-        viz_container = st.empty()
-        debug_container = st.empty() if st.session_state.debug_mode else None
-
-        # Prepare streaming request with timeout
-        timeout = 60  # 60 seconds timeout
-        current_content = ""
-        has_error = False
+        # Initialize message containers
+        message_containers = {
+            "content": st.empty(),
+            "sql": st.empty(),
+            "viz": st.empty(),
+            "debug": st.empty() if st.session_state.debug_mode else None
+        }
         
+        # Initialize message data
+        current_message = {
+            "role": "assistant",
+            "content": "",
+            "request_id": request_id
+        }
+        
+        # Start streaming request
         with requests.post(
             f"{st.session_state.api_url}/chat/stream",
             json={
                 "message": query,
-                "session_id": str(uuid.uuid4()),
+                "session_id": st.session_state.current_chat_id,
                 "is_direct_query": False
             },
             headers={
@@ -288,21 +295,15 @@ def process_streaming_query(query: str, request_id: str):
                 "Accept": "text/event-stream"
             },
             stream=True,
-            timeout=timeout
+            timeout=60
         ) as response:
-            
             if response.status_code != 200:
                 raise Exception(f"API returned status code {response.status_code}")
             
             client = sseclient.SSEClient(response)
             
-            # Process events with timeout
-            start_time = time.time()
+            # Process events
             for event in client.events():
-                # Check if we've exceeded timeout
-                if time.time() - start_time > timeout:
-                    raise TimeoutError("Stream processing exceeded timeout")
-                
                 if not event.data:
                     continue
                 
@@ -310,63 +311,83 @@ def process_streaming_query(query: str, request_id: str):
                     data = json.loads(event.data)
                     event_type = data.get("type", "")
                     
-                    # Show raw event data if debug mode is enabled
-                    if st.session_state.show_raw_events:
-                        with debug_container:
+                    # Show raw events if debug mode is enabled
+                    if st.session_state.show_raw_events and message_containers["debug"]:
+                        with message_containers["debug"]:
                             st.json(data)
                     
                     if event_type == "content":
                         content = data.get("content", "")
-                        current_content += content
-                        with content_container:
-                            st.markdown(current_content)
+                        current_message["content"] += content
+                        with message_containers["content"]:
+                            st.markdown(current_message["content"])
                     
-                    elif event_type == "sql":
-                        sql_query = data.get("sql", "")
-                        with sql_container:
-                            st.code(sql_query, language="sql")
+                    elif event_type == "sql_query":
+                        sql_query = data.get("sql_query", "")
+                        current_message["sql_query"] = sql_query
+                        with message_containers["sql"]:
+                            with st.expander("View SQL Query"):
+                                st.code(sql_query, language="sql")
+                    
+                    elif event_type == "sql_results":
+                        sql_results = data.get("sql_results", {})
+                        current_message["sql_results"] = sql_results
                     
                     elif event_type == "visualization":
-                        viz_data = data.get("visualization", "")
-                        with viz_container:
-                            st.markdown(viz_data)
+                        viz_data = data.get("visualization", {})
+                        current_message["visualization"] = viz_data
+                        with message_containers["viz"]:
+                            if isinstance(viz_data, dict) and "data" in viz_data:
+                                viz_service = StreamlitVisualizationService()
+                                viz_service.create_visualization(
+                                    viz_data["data"],
+                                    current_message.get("content", "")
+                                )
+                    
+                    elif event_type == "plotly_json":
+                        plotly_data = data.get("data", {})
+                        current_message["plotly_json"] = plotly_data
+                        with message_containers["viz"]:
+                            if plotly_data:
+                                fig = go.Figure(plotly_data)
+                                st.plotly_chart(fig, use_container_width=True)
+                    
+                    elif event_type == "debug_info":
+                        debug_info = data.get("debug_info", {})
+                        current_message["debug_info"] = debug_info
+                        if st.session_state.debug_mode and message_containers["debug"]:
+                            with message_containers["debug"]:
+                                with st.expander("Debug Info"):
+                                    st.json(debug_info)
                     
                     elif event_type == "error":
                         error_msg = data.get("error", "An unknown error occurred")
-                        has_error = True
-                        with content_container:
-                            st.error(f"Error: {error_msg}")
+                        current_message["content"] = f"Error: {error_msg}"
+                        current_message["error"] = error_msg
+                        with message_containers["content"]:
+                            st.error(error_msg)
                     
                     elif event_type == "end":
-                        # Update final message in session state
-                        if not has_error:
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": current_content,
-                                "sql": sql_container.code if sql_container else None,
-                                "visualization": viz_data if 'viz_data' in locals() else None
-                            })
+                        # Add the final message to session state
+                        st.session_state.messages.append(current_message)
                         break
                 
                 except json.JSONDecodeError as e:
-                    logging.error(f"Failed to parse event data: {e}")
+                    logger.error(f"Failed to parse event data: {e}")
                     continue
                 except Exception as e:
-                    logging.error(f"Error processing event: {e}")
+                    logger.error(f"Error processing event: {e}")
                     continue
             
             # Clean up streaming client
             client.close()
             
     except TimeoutError:
-        with content_container:
-            st.error("The request timed out. Please try again or rephrase your question.")
+        st.error("The request timed out. Please try again or rephrase your question.")
     except requests.exceptions.RequestException as e:
-        with content_container:
-            st.error(f"Failed to connect to the API: {str(e)}")
+        st.error(f"Failed to connect to the API: {str(e)}")
     except Exception as e:
-        with content_container:
-            st.error(f"An unexpected error occurred: {str(e)}")
+        st.error(f"An unexpected error occurred: {str(e)}")
     finally:
         # Reset processing state
         st.session_state.processing = False
@@ -413,325 +434,41 @@ def display_rag_flow(steps: List[Dict[str, Any]],
                 debug_info["error"] = str(e)
 
 
-def display_message(message):
-    """Display a single message in the chat interface"""
-    if message["role"] == "user":
-        st.chat_message("user").write(message["content"])
-    else:
-        logger.info(
-            f"Displaying assistant message, content length: {len(message.get('content', ''))}, has SQL: {bool(message.get('sql_query'))}, has viz: {bool(message.get('visualization') or message.get('plotly_json'))}")
-
-        with st.chat_message("assistant"):
-            if message.get("content"):
-                st.write(message["content"])
-                logger.debug(
-                    f"Assistant content displayed: {message['content'][:100]}...")
-
-                # Check if no data was found and no visualization is present
-                content = message.get("content", "").lower()
-                no_data_keywords = [
-                    "no data",
-                    "no results",
-                    "no information",
-                    "couldn't find",
-                    "i don't have",
-                    "didn't find"
-                ]
-                has_no_data = any(
-                    keyword in content for keyword in no_data_keywords)
-                has_viz = bool(message.get("visualization")
-                               or message.get("plotly_json"))
-                has_sql_results = bool(message.get("sql_results") and len(message.get("sql_results", [])) > 0)
-                
-                # If no data was found and no visualization available, show suggestions
-                if (has_no_data and not has_viz) or (not has_sql_results and "no data" in content):
-                    # Get alternative suggestions from debug_info if available
-                    alternative_suggestions = None
-                    if message.get("debug_info") and message.get("debug_info").get("alternative_suggestions"):
-                        alternative_suggestions = message.get("debug_info").get("alternative_suggestions")
-                    
-                    # If we have suggestions from the backend, use them
-                    if alternative_suggestions and isinstance(alternative_suggestions, list) and len(alternative_suggestions) > 0:
-                        # Format the suggestions as a list
-                        suggestion_text = "\n".join([f"- {suggestion}" for suggestion in alternative_suggestions])
-                        st.info(f"""
-                        **Try these alternative queries:**
-                        {suggestion_text}
-                        """)
-                    else:
-                        # Fallback to default suggestions
-                        st.info("""
-                        **Try these alternative queries:**
-                        - "How many tourists visited Lugano in 2023?"
-                        - "Show me tourism trends across Ticino"
-                        - "What was the breakdown of spending by industry?"
-                        - "Compare Swiss tourists vs foreign tourists in Bellinzona"
-                        """)
-            elif message.get("is_streaming", False):
-                # Display loading for streaming messages with no content
-                st.info("Loading response...")
-            else:
-                # Check if we have API connection issue with SQL results but no
-                # content
-                if message.get("sql_query") and not message.get("content"):
-                    # Create a fallback response from SQL results
-                    fallback_msg = "I've found some results for your query, but I'm having trouble generating a detailed explanation."
-                    plotly_json = message.get("plotly_json", {})
-
-                    # Check for single value in plotly_json
-                    if plotly_json and isinstance(
-                            plotly_json, dict) and plotly_json.get("single_value"):
-                        column_name = plotly_json.get(
-                            "column_name", "").replace("_", " ")
-                        value = plotly_json.get("value")
-                        if column_name and value is not None:
-                            fallback_msg = f"Based on the data, the {column_name} is {value}."
-
-                    st.write(fallback_msg)
-                    logger.warning(
-                        "Generated fallback content for message with SQL but no content")
-                else:
-                    logger.warning(
-                        "Assistant message has no content to display")
-
-            # Create a container for visualization and SQL
-            vis_container = st.container()
-
-            with vis_container:
-                # --- Enhanced Visualization Handling ---
-                plotly_json = message.get("plotly_json")
-                legacy_vis = message.get("visualization")
-
-                # Display SQL query if available
-                if message.get("sql_query"):
-                    with st.expander("SQL Query", expanded=False):
-                        st.code(message["sql_query"], language="sql")
-
-                # Handle Plotly visualizations
-                if plotly_json:
-                    try:
-                        logger.debug("Attempting to display Plotly JSON chart")
-                        # Check if we're dealing with a raw JSON string or a
-                        # dict
-                        if isinstance(plotly_json, str):
-                            fig_dict = json.loads(plotly_json)
-                        else:
-                            fig_dict = plotly_json
-
-                        # Handle single value visualization specially
-                        is_single_value = False
-                        if isinstance(fig_dict,
-                                      dict) and fig_dict.get("single_value"):
-                            is_single_value = True
-                            logger.info("Detected single value visualization")
-
-                        fig = go.Figure(fig_dict)
-
-                        # Add responsive layout settings
-                        if is_single_value:
-                            # Special layout for single values
-                            fig.update_layout(
-                                autosize=True,
-                                margin=dict(l=20, r=20, t=30, b=20),
-                                height=200,  # Smaller height for single values
-                            )
-                        else:
-                            # Normal chart layout
-                            fig.update_layout(
-                                autosize=True,
-                                margin=dict(l=20, r=20, t=30, b=20),
-                                height=400,
-                            )
-
-                        st.plotly_chart(fig, use_container_width=True)
-                        logger.debug("Successfully displayed Plotly chart")
-                    except Exception as e:
-                        logger.error(
-                            f"Error displaying Plotly JSON chart: {str(e)}",
-                            exc_info=True)
-                        st.error(
-                            f"Could not display interactive chart: {str(e)}")
-                        # Try to show the JSON for debugging
-                        with st.expander("Raw Plotly Data", expanded=False):
-                            st.json(plotly_json)
-
-                # Handle legacy visualizations as fallback
-                elif legacy_vis:
-                    logger.debug(
-                        f"Displaying legacy visualization: {type(legacy_vis)}")
-                    try:
-                        if isinstance(legacy_vis, dict):
-                            vis_type = legacy_vis.get("type", "")
-
-                            # Handle no_data type explicitly
-                            if vis_type == "no_data":
-                                st.warning(
-                                    f"No data was found for the query: '{legacy_vis.get('data', {}).get('query', 'Unknown query')}'")
-                                st.info("""
-                                **Try these alternative queries:**
-                                - "How many tourists visited Lugano in 2023?"
-                                - "Show me tourism trends across Ticino"
-                                - "What was the breakdown of spending by industry?"
-                                - "Compare Swiss tourists vs foreign tourists in Bellinzona"
-                                """)
-                            # Handle tables with improved formatting
-                            elif vis_type == "table":
-                                table_data = legacy_vis.get("data", [])
-                                if table_data:
-                                    # Check for single value table
-                                    if len(table_data) == 1 and len(
-                                            table_data[0]) == 1:
-                                        # Extract the single key-value pair
-                                        key = list(table_data[0].keys())[0]
-                                        value = table_data[0][key]
-                                        key_readable = key.replace("_", " ")
-
-                                        # Create a custom display for single
-                                        # value
-                                        st.markdown(
-                                            f"### {key_readable.title()}")
-                                        st.markdown(
-                                            f"<h1 style='text-align: center; color: #1E88E5;'>{value}</h1>",
-                                            unsafe_allow_html=True)
-                                    else:
-                                        # Regular table display
-                                        df = pd.DataFrame(table_data)
-
-                                        # Format numeric columns
-                                        for col in df.select_dtypes(
-                                                include=['float64', 'int64']).columns:
-                                            df[col] = df[col].map(
-                                                lambda x: f"{x:,.2f}" if isinstance(
-                                                    x, float) else x)
-
-                                        st.dataframe(
-                                            df,
-                                            use_container_width=True,
-                                            # Dynamic height based on row count
-                                            height=min(400, 50 + 35 * len(df))
-                                        )
-
-                            # Handle images with improved display
-                            elif vis_type == "image":
-                                image_data = legacy_vis.get("data", "")
-                                if "base64," in image_data:
-                                    b64_data = image_data.split("base64,")[1]
-                                else:
-                                    b64_data = image_data
-
-                                image_bytes = base64.b64decode(b64_data)
-                                st.image(image_bytes, use_column_width=True)
-
-                            # Handle plotly_json inside visualization dict
-                            # (newer format)
-                            elif vis_type == "plotly_json":
-                                plotly_data = legacy_vis.get("data", "")
-                                try:
-                                    if isinstance(plotly_data, str):
-                                        fig_dict = json.loads(plotly_data)
-                                    else:
-                                        fig_dict = plotly_data
-
-                                    fig = go.Figure(fig_dict)
-                                    st.plotly_chart(
-                                        fig, use_container_width=True)
-                                except Exception as e:
-                                    logger.error(
-                                        f"Error displaying embedded Plotly JSON: {str(e)}")
-                                    st.error(
-                                        "Could not display interactive chart")
-
-                            # Handle unknown visualization types
-                            else:
-                                logger.warning(
-                                    f"Unknown legacy visualization type: {vis_type}")
-                                with st.expander("Raw Visualization Data", expanded=False):
-                                    st.json(legacy_vis)
-                        else:
-                            logger.warning(
-                                f"Legacy visualization is not a dict: {type(legacy_vis)}")
-                            st.write(legacy_vis)
-                    except Exception as e:
-                        logger.error(
-                            f"Error displaying legacy visualization: {str(e)}",
-                            exc_info=True)
-                        st.error("Could not display visualization.")
-                # --- End Enhanced Visualization Handling ---
-
-                # --- Check for missing visualization but has SQL results ---
-                elif message.get("sql_query") and not message.get("visualization") and not message.get("plotly_json"):
-                    # Only show this if we have a successful response
-                    if message.get("content") and len(message.get("content")) > 10:
-                        # Show a more helpful message that doesn't imply missing information
-                        st.info("This analysis is presented in text form as it's best understood through the analytical insight above.")
-                        
-                        # Display SQL results table if available directly in the message
-                        if message.get("sql_results"):
-                            sql_results = message.get("sql_results")
-                            st.subheader("SQL Results")
-                            # Format the data as a dataframe
-                            df = pd.DataFrame(sql_results)
-                            
-                            # Format any numeric columns
-                            for col in df.select_dtypes(include=['float64', 'int64']).columns:
-                                df[col] = df[col].map(lambda x: f"{x:,.2f}" if isinstance(x, float) else x)
-                            
-                            # Display the dataframe with scroll if needed
-                            st.dataframe(
-                                df,
-                                use_container_width=True,
-                                height=min(400, 50 + 35 * len(df))  # Dynamic height based on row count
-                            )
-                            
-                            # Add export buttons
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                # CSV download button
-                                csv = df.to_csv(index=False)
-                                st.download_button(
-                                    label="Download CSV",
-                                    data=csv,
-                                    file_name="sql_results.csv",
-                                    mime="text/csv"
-                                )
-                            with col2:
-                                # Excel download button (if possible)
-                                try:
-                                    buffer = BytesIO()
-                                    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                                        df.to_excel(writer, sheet_name='Results', index=False)
-                                    st.download_button(
-                                        label="Download Excel",
-                                        data=buffer.getvalue(),
-                                        file_name="sql_results.xlsx",
-                                        mime="application/vnd.ms-excel"
-                                    )
-                                except Exception as e:
-                                    logger.error(f"Error creating Excel file: {str(e)}")
-                                    # Fallback to CSV if Excel fails
-                                    if not col1.button_hooked:
-                                        st.download_button(
-                                            label="Download CSV (Excel not available)",
-                                            data=csv,
-                                            file_name="sql_results.csv",
-                                            mime="text/csv"
-                                        )
-
-            # Display debug info if available
-            if message.get("debug_info"):
-                with st.expander("Debug Information", expanded=False):
-                    # Show steps and processing time
-                    debug_display = message.copy()
-                    debug_display.pop('visualization', None)
-                    debug_display.pop('plotly_json', None)
-                    st.json(debug_display)
-                    
-                    # If raw event data was collected, show it
-                    if message.get("raw_events"):
-                        with st.expander("Raw Event Data", expanded=False):
-                            for i, event in enumerate(message.get("raw_events", [])):
-                                with st.expander(f"Event {i+1}: {event.get('type', 'unknown')}", expanded=False):
-                                    st.code(json.dumps(event, indent=2), language="json")
+def display_message(message: Dict[str, Any]) -> None:
+    """Display a chat message with its associated content."""
+    with st.chat_message(message["role"]):
+        # Display the main content
+        st.markdown(message.get("content", ""))
+        
+        # Initialize visualization service if needed
+        viz_service = StreamlitVisualizationService()
+        
+        # Display SQL query if present
+        if "sql_query" in message:
+            with st.expander("View SQL Query"):
+                st.code(message["sql_query"], language="sql")
+        
+        # Display SQL results if present
+        if "sql_results" in message:
+            with st.expander("View Data"):
+                viz_service.create_visualization(
+                    message["sql_results"],
+                    message.get("content", "")  # Use message content as context
+                )
+        
+        # Display visualization if present
+        if "visualization" in message:
+            viz_data = message["visualization"]
+            if isinstance(viz_data, dict) and "data" in viz_data:
+                viz_service.create_visualization(
+                    viz_data["data"],
+                    message.get("content", "")
+                )
+        
+        # Display debug info if present and debug mode is enabled
+        if st.session_state.get("debug_mode", False) and "debug_info" in message:
+            with st.expander("Debug Info"):
+                st.json(message["debug_info"])
 
 
 # Sidebar for chat history and settings

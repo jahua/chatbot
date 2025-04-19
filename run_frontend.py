@@ -35,13 +35,16 @@ def check_dependencies():
 
 def run_streamlit():
     """Run the Streamlit frontend application."""
-    frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+    # Get the project root directory
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    frontend_dir = os.path.join(project_root, "frontend")
     
     if not os.path.exists(os.path.join(frontend_dir, "app.py")):
         print(f"Error: Frontend app not found at {frontend_dir}/app.py")
         sys.exit(1)
     
     print(f"Starting Streamlit frontend from {frontend_dir}...")
+    print(f"Using project root: {project_root}")
     
     # Kill any existing Streamlit processes
     try:
@@ -54,12 +57,20 @@ def run_streamlit():
     # Change to the frontend directory
     os.chdir(frontend_dir)
     
-    # Run Streamlit
+    # Add project root to PYTHONPATH
+    env = os.environ.copy()
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{project_root}:{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = project_root
+    
+    # Run Streamlit with modified environment
     streamlit_process = subprocess.Popen(
         ["streamlit", "run", "app.py"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        universal_newlines=True
+        universal_newlines=True,
+        env=env
     )
     
     # Print URL information
