@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4")
     
+    # LLM Settings
+    LLM_API_TIMEOUT: int = int(os.getenv("LLM_API_TIMEOUT", "45"))  # Timeout for LLM API calls in seconds
+    
     # Security Settings
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))

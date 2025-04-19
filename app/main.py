@@ -23,7 +23,8 @@ from fastapi.responses import JSONResponse
 import uuid
 from datetime import datetime, date
 import decimal
-from typing import Optional
+from typing import Optional, Dict, Any
+from fastapi import APIRouter
 
 # Ensure log directory exists
 log_dir = os.path.dirname(os.path.abspath(__file__))
@@ -61,6 +62,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Create API router with prefix
+api_router = APIRouter(
+    prefix=settings.API_V1_STR,
+    tags=["api"]
 )
 
 # Global chat service instance
@@ -156,7 +163,8 @@ def prepare_debug_info(debug_info):
     
     return debug_info
 
-@app.post("/chat")
+# Move endpoints to router
+@api_router.post("/chat")
 async def chat(
     request: ChatRequest,
     dw_db: Session = Depends(get_dw_db)
@@ -189,8 +197,8 @@ async def chat(
         }
         return JSONResponse(content=error_response, status_code=500)
 
-@app.get("/chat/stream")
-@app.post("/chat/stream")
+@api_router.get("/chat/stream")
+@api_router.post("/chat/stream")
 async def stream_chat(request: ChatRequest, dw_db: Session = Depends(get_dw_db), chat_service: ChatService = Depends(get_chat_service), debug_service: DebugService = Depends(get_debug_service)):
     """Stream a response from the chat service."""
     try:
@@ -246,28 +254,86 @@ async def generate(chat_service: ChatService, request: ChatRequest, debug_servic
         error_message = {"type": "error", "error": str(e)}
         yield f"data: {json.dumps(error_message)}\n\n"
 
-def json_serialize_debug_info(obj):
-    """Process debug info to ensure all values are JSON serializable."""
-    if isinstance(obj, dict):
-        return {k: json_serialize_debug_info(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [json_serialize_debug_info(i) for i in obj]
-    elif isinstance(obj, (datetime, date)):
-        return obj.isoformat()
-    elif isinstance(obj, decimal.Decimal):
-        return float(obj)
+def json_serialize_debug_info(debug_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure all values in the debug info are JSON serializable."""
+    serialized = {}
+
+    # Process each item in the debug info
+    for key, value in debug_info.items():
+        # Handle steps specially
+        if key == "steps":
+            serialized[key] = json_serialize_steps(value)
+        # Handle alternative suggestions specially
+        elif key == "alternative_suggestions" and isinstance(value, list):
+            # Ensure all suggestions are strings
+            serialized[key] = [str(suggestion) for suggestion in value]
+        # Handle other values
+        else:
+            serialized[key] = json_serialize_value(value)
+
+    return serialized
+
+def json_serialize_steps(steps):
+    """Serialize steps to ensure they are JSON serializable."""
+    if isinstance(steps, list):
+        return [json_serialize_step(step) for step in steps]
+    elif isinstance(steps, DebugStep):
+        return asdict(steps)
     else:
-        return obj
+        return steps
+
+def json_serialize_step(step):
+    """Serialize a single step to ensure it's JSON serializable."""
+    if isinstance(step, DebugStep):
+        return asdict(step)
+    elif isinstance(step, dict):
+        return {k: json_serialize_value(v) for k, v in step.items()}
+    else:
+        return step
+
+def json_serialize_value(value):
+    """Serialize a single value to ensure it's JSON serializable."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    elif isinstance(value, decimal.Decimal):
+        return float(value)
+    else:
+        return value
+
+@api_router.get("/test")
+async def test_router():
+    return {"message": "Router endpoint working"}
+
+@api_router.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "ok"}
+
+@api_router.get("/")
+async def root():
+    """Root endpoint"""
+    return {"message": "Welcome to Tourism Analytics API"}
+
+@app.get("/test")
+async def test():
+    return {"message": "Test endpoint working"}
+
+@app.get("/test-app")
+async def test_app():
+    return {"message": "App endpoint working"}
+
+@app.get("/api/v1/health")
+async def health():
+    return {"status": "ok"}
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint to verify the API is running"""
-    return {"status": "ok", "time": datetime.now().isoformat()}
+async def root_health_check():
+    """Root health check endpoint"""
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
-@app.get("/")
-async def root():
-    return {
-        "message": "Welcome to the Tourism Analytics API",
-        "docs": "/docs",
-        "redoc": "/redoc"
-    } 
+# Include router in app
+app.include_router(api_router)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000) 

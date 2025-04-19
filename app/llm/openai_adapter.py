@@ -307,7 +307,8 @@ Return a visualization configuration as JSON."""
                 return "Error: API base URL is missing"
                 
             # Log API configuration for debugging
-            logger.debug(f"Using OpenAI API base: {self.api_base}")
+            logger.info(f"OPENAI CONFIG - API base: {self.api_base}")
+            logger.info(f"OPENAI CONFIG - Model: {settings.OPENAI_MODEL}")
             
             # Generate response based on output type
             if output_type == "json":
@@ -317,13 +318,15 @@ Return a visualization configuration as JSON."""
                     {"role": "user", "content": prompt}
                 ]
                 
+                logger.info(f"OPENAI REQUEST - About to call OpenAI with model: {settings.OPENAI_MODEL}")
                 response = await self.client.chat.completions.create(
-                    model="gpt-3.5-turbo",
+                    model=settings.OPENAI_MODEL,
                     messages=messages,
                     temperature=0.2,
                     max_tokens=500
                 )
                 
+                logger.info(f"OPENAI RESPONSE - Model used: {response.model}")
                 return response.choices[0].message.content
             else:
                 # For text output
@@ -332,13 +335,15 @@ Return a visualization configuration as JSON."""
                     {"role": "user", "content": prompt}
                 ]
                 
+                logger.info(f"OPENAI REQUEST - About to call OpenAI with model: {settings.OPENAI_MODEL}")
                 response = await self.client.chat.completions.create(
-                    model="gpt-3.5-turbo",
+                    model=settings.OPENAI_MODEL,
                     messages=messages,
                     temperature=0.7,
                     max_tokens=1000
                 )
                 
+                logger.info(f"OPENAI RESPONSE - Model used: {response.model}")
                 return response.choices[0].message.content
                 
         except Exception as e:

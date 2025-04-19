@@ -24,12 +24,16 @@ Query Intent: {query_intent}
 
 Visualization Info: {visualization_info}
 
+{alternative_suggestions}
+
 Your task is to analyze the SQL results and provide a natural, conversational response to the user's query.
 The response should:
 1. Be concise and to the point
 2. Highlight key findings or trends from the data
 3. Reference specific numbers or statistics when relevant
 4. Include insights that might be useful for tourism analysis
+
+If no data was found, politely inform the user and suggest they try alternative queries as mentioned in the suggestions.
 
 Please respond only with the final answer to the user, in a conversational tone. Do not include any preamble like "Based on the data" or "According to the SQL results".
 """

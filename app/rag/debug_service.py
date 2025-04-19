@@ -1,6 +1,6 @@
 import logging
 import json
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 from dataclasses import dataclass, asdict
 import traceback
@@ -47,14 +47,10 @@ class DebugService:
         
         return message_id
     
-    def start_step(self, name: str, details: Optional[Union[Dict[str, Any], str]] = None) -> None:
+    def start_step(self, name: str, details: Optional[Dict[str, Any]] = None) -> None:
         """Start a new step in the RAG flow"""
         if self.current_step:
             self.end_step()
-        
-        # Convert string details to a dictionary if needed
-        if isinstance(details, str):
-            details = {"description": details}
         
         self.current_step = DebugStep(
             name=name,
@@ -109,13 +105,8 @@ class DebugService:
         
         # Add any details if provided
         if details:
-            # Convert string details to dict if needed
-            if isinstance(target_step.details, str):
-                target_step.details = {"description": target_step.details}
-                
             if target_step.details is None:
                 target_step.details = {}
-                
             target_step.details.update(details)
             
         # Log the step end
@@ -129,10 +120,6 @@ class DebugService:
         """Add details to the current step"""
         if not self.current_step:
             return
-        
-        # Convert string details to dict if needed
-        if isinstance(self.current_step.details, str):
-            self.current_step.details = {"description": self.current_step.details}
         
         if not self.current_step.details:
             self.current_step.details = {}
@@ -256,12 +243,23 @@ class DebugService:
             
         return formatted_info
     
+    def get_flow_info(self) -> Dict[str, Any]:
+        """Get information about the current flow execution."""
+        return {
+            "flow_id": self.message_id,
+            "steps": [asdict(step) for step in self.steps],
+            "start_time": self.flow_start_time,
+            "end_time": datetime.now() if self.steps else None,
+            "duration": (datetime.now() - self.flow_start_time).total_seconds() if self.flow_start_time else None,
+            "error": next((step.error for step in reversed(self.steps) if step.error), None)
+        }
+    
     def end_flow(self, success: bool = True) -> Dict[str, Any]:
         """End the current flow and return debug info"""
         # End any current step
         if self.current_step:
             self.end_step()
-            
+        
         # Get debug info
         debug_info = self.get_debug_info_for_response()
         
@@ -272,34 +270,6 @@ class DebugService:
         self.log_flow_summary()
         
         return debug_info
-    
-    def add_flow_note(self, note: str) -> None:
-        """Add a note to the current flow for debugging purposes"""
-        logger.info(f"Flow note: {note}")
-        # Create a special system step to record the note
-        step = DebugStep(
-            name="system_note",
-            status="completed",
-            start_time=datetime.now(),
-            end_time=datetime.now(),
-            duration_ms=0,
-            details={"note": note}
-        )
-        self.steps.append(step)
-    
-    def get_steps(self) -> List[Dict[str, Any]]:
-        """Get all steps in the flow"""
-        return [asdict(step) for step in self.steps]
-    
-    def get_total_duration(self) -> float:
-        """Calculate the total duration of the flow in milliseconds"""
-        # If we have a flow start time, calculate from that
-        if self.flow_start_time:
-            total_time = (datetime.now() - self.flow_start_time).total_seconds() * 1000
-            return round(total_time, 2)
-        
-        # Otherwise sum up the durations of all completed steps
-        return round(sum(step.duration_ms or 0 for step in self.steps), 2)
     
     def update_step(self, name: str, details: Optional[Dict[str, Any]] = None) -> None:
         """Update details for a specific step by name"""
@@ -316,15 +286,7 @@ class DebugService:
             
         # Update details
         if details:
-            # Convert string details to dict if needed
-            if isinstance(target_step.details, str):
-                # If details was a string, convert to dict with the string as a description
-                target_step.details = {"description": target_step.details}
-            
-            # Initialize details if None
-            if target_step.details is None:
+            if not target_step.details:
                 target_step.details = {}
-                
-            # Now we can safely update
             target_step.details.update(details)
             logger.debug(f"Updated step {name} details: {json.dumps(details, indent=2)}") 

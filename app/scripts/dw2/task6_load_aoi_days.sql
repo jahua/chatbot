@@ -37,7 +37,7 @@ BEGIN
     IF v_bellinzona_region_id IS NULL THEN
         RAISE EXCEPTION 'Bellinzona region not found in dim_region table';
     END IF;
-
+    
     -- Count total records to process
     SELECT COUNT(*) INTO v_record_count
     FROM data_lake.aoi_days_raw
@@ -74,28 +74,28 @@ BEGIN
 
                     IF v_date_id IS NULL THEN
                         v_date_id := TO_CHAR(v_record.aoi_date, 'YYYYMMDD')::INTEGER;
-                    END IF;
-
+            END IF;
+            
                     -- Calculate average dwell time
                     v_avg_dwell_time := NULL;
                     IF v_record.dwelltimes IS NOT NULL AND jsonb_array_length(v_record.dwelltimes) > 0 THEN
-                        SELECT 
+            SELECT 
                             SUM(visitors * mins) / NULLIF(SUM(visitors), 0)
                         INTO v_avg_dwell_time
-                        FROM (
-                            SELECT 
-                                elem::NUMERIC as visitors,
-                                CASE 
-                                    WHEN idx = 0 THEN 15
-                                    WHEN idx = 1 THEN 30
-                                    WHEN idx = 2 THEN 60
-                                    WHEN idx = 3 THEN 120
-                                    WHEN idx = 4 THEN 180
-                                    WHEN idx = 5 THEN 240
+                FROM (
+                    SELECT 
+                        elem::NUMERIC as visitors,
+                        CASE 
+                            WHEN idx = 0 THEN 15
+                            WHEN idx = 1 THEN 30
+                            WHEN idx = 2 THEN 60
+                            WHEN idx = 3 THEN 120
+                            WHEN idx = 4 THEN 180
+                            WHEN idx = 5 THEN 240
                                     WHEN idx = 6 THEN 360
-                                    ELSE 480
-                                END as mins
-                            FROM jsonb_array_elements(v_record.dwelltimes) WITH ORDINALITY AS arr(elem, idx)
+                            ELSE 480
+                        END as mins
+                        FROM jsonb_array_elements(v_record.dwelltimes) WITH ORDINALITY AS arr(elem, idx)
                         ) as dwell_data;
                     END IF;
 
@@ -155,10 +155,10 @@ BEGIN
                             'last_validation', CURRENT_TIMESTAMP
                         ),
                         CURRENT_TIMESTAMP,
-                        CURRENT_TIMESTAMP
-                    )
+        CURRENT_TIMESTAMP
+        )
                     ON CONFLICT (date_id, region_id, source_system) 
-                    DO UPDATE SET
+    DO UPDATE SET
                         total_visitors = EXCLUDED.total_visitors,
                         swiss_tourists = EXCLUDED.swiss_tourists,
                         foreign_tourists = EXCLUDED.foreign_tourists,
@@ -183,8 +183,8 @@ BEGIN
                     -- Log progress for every 10 records
                     IF v_processed % 10 = 0 THEN
                         RAISE NOTICE 'Processed % records so far', v_processed;
-                    END IF;
-                    
+    END IF;
+        
                 EXCEPTION
                     WHEN OTHERS THEN
                         v_failed := v_failed + 1;
@@ -204,14 +204,14 @@ BEGIN
                 -- Handle cursor errors
                 IF v_records_cursor IS NOT NULL AND v_records_cursor % FOUND THEN
                     CLOSE v_records_cursor;
-                END IF;
-                
+    END IF;
+    
                 v_failed := v_failed + p_batch_size;
                 GET STACKED DIAGNOSTICS v_last_error = MESSAGE_TEXT;
                 RAISE WARNING 'Error processing batch: % (%)', SQLERRM, SQLSTATE;
         END;
     END LOOP;
-
+    
     v_end_time := CURRENT_TIMESTAMP;
 
     RETURN QUERY SELECT 

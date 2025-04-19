@@ -85,14 +85,14 @@ BEGIN
 END $$;
 
 -- Step 2: Set up region mappings
-CREATE TEMP TABLE temp_italian_mappings (
-    italian_name TEXT,
-    canonical_name TEXT,
+    CREATE TEMP TABLE temp_italian_mappings (
+        italian_name TEXT,
+        canonical_name TEXT,
     region_type TEXT
 );
 
 -- Insert mappings for Ticino tourism regions and Switzerland
-INSERT INTO temp_italian_mappings (italian_name, canonical_name, region_type) VALUES
+    INSERT INTO temp_italian_mappings (italian_name, canonical_name, region_type) VALUES
     ('Bellinzona e Alto Ticino', 'Bellinzonese', 'tourism_region'),
     ('Lago Maggiore e Valli', 'Ascona-Locarno', 'tourism_region'),
     ('Lago di Lugano', 'Luganese', 'tourism_region'),
@@ -101,36 +101,36 @@ INSERT INTO temp_italian_mappings (italian_name, canonical_name, region_type) VA
 
 -- Create mappings in dim_region_mapping
 INSERT INTO dw.dim_region_mapping (region_id, variant_name, variant_type, source_system)
-SELECT 
-    dr.region_id,
-    tim.italian_name,
-    'canonical',
+    SELECT 
+        dr.region_id,
+        tim.italian_name,
+        'canonical',
     'intervista'
-FROM temp_italian_mappings tim
+    FROM temp_italian_mappings tim
 JOIN dw.dim_region dr ON dr.region_name = tim.canonical_name AND dr.region_type = tim.region_type
-ON CONFLICT (variant_name, source_system) DO NOTHING;
-
+    ON CONFLICT (variant_name, source_system) DO NOTHING;
+    
 -- Step 3: Set up visitor types
-INSERT INTO dw.dim_visitor_type (
-    visitor_code,
-    visitor_name,
-    visitor_category,
-    visitor_subcategory,
-    is_domestic,
-    is_overnight,
-    is_business,
-    intervista_category_name,
-    description,
-    valid_from,
-    valid_to,
-    created_at,
-    updated_at
-)
-SELECT 
+    INSERT INTO dw.dim_visitor_type (
+        visitor_code,
+        visitor_name,
+        visitor_category,
+        visitor_subcategory,
+        is_domestic,
+        is_overnight,
+        is_business,
+        intervista_category_name,
+        description,
+        valid_from,
+        valid_to,
+        created_at,
+        updated_at
+    )
+    SELECT 
     'INT_' || visit_type_id,
     visit_type_name,
-    'general',
-    'standard',
+        'general',
+        'standard',
     CASE 
         WHEN visit_type_name = 'total' THEN FALSE
         WHEN visit_type_name = 'overnight' THEN TRUE
@@ -145,21 +145,21 @@ SELECT
     visit_type_name,
     visit_type_description,
     '2023-01-01'::DATE,
-    '9999-12-31'::DATE,
-    CURRENT_TIMESTAMP,
-    CURRENT_TIMESTAMP
-FROM inervista.dim_visit_type ivt
-WHERE NOT EXISTS (
-    SELECT 1 FROM dw.dim_visitor_type dvt
-    WHERE dvt.intervista_category_name = ivt.visit_type_name
-);
-
+        '9999-12-31'::DATE,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+    FROM inervista.dim_visit_type ivt
+    WHERE NOT EXISTS (
+        SELECT 1 FROM dw.dim_visitor_type dvt
+        WHERE dvt.intervista_category_name = ivt.visit_type_name
+    );
+    
 -- Step 4: Load Intervista data into fact_visitor
 TRUNCATE TABLE dw.fact_visitor;
 
 INSERT INTO dw.fact_visitor (
-    date_id,
-    region_id,
+            date_id,
+            region_id,
     total_visitors,
     swiss_tourists,
     foreign_tourists,
@@ -170,11 +170,11 @@ INSERT INTO dw.fact_visitor (
     top_swiss_cantons,
     transaction_metrics,
     source_system
-)
-SELECT 
+        )
+        SELECT 
     -- Date handling: Use first day of month for date_id
     (2023 * 10000 + ft.date_id * 100 + 1) as date_id,
-    dr.region_id,
+            dr.region_id,
     
     -- Visitor metrics using dim_visitor_type with data_category
     SUM(ft.total) as total_visitors,

@@ -7,7 +7,17 @@ if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path=dotenv_path, override=True)
 
 # API Configuration
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+def get_api_url():
+    """Get the API URL with proper error handling and defaults"""
+    base_url = os.getenv("API_URL", "http://localhost:8000").rstrip('/')
+    if not base_url.startswith(('http://', 'https://')):
+        base_url = f"http://{base_url}"
+    
+    # Add API version prefix
+    api_prefix = os.getenv("API_V1_STR", "/api/v1").rstrip('/')
+    return f"{base_url}{api_prefix}"
+
+API_URL = get_api_url()
 
 # Database Configuration
 DB_CONFIG = {
