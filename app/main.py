@@ -64,12 +64,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create API router with prefix
-api_router = APIRouter(
-    prefix=settings.API_V1_STR,
-    tags=["api"]
-)
-
 # Global chat service instance
 chat_service = None
 debug_service = None
@@ -163,8 +157,45 @@ def prepare_debug_info(debug_info):
     
     return debug_info
 
-# Move endpoints to router
-@api_router.post("/chat")
+@app.post("/chat/stream")
+async def stream_chat(
+    request: ChatRequest,
+    dw_db: Session = Depends(get_dw_db),
+    chat_service: ChatService = Depends(get_chat_service),
+    debug_service: DebugService = Depends(get_debug_service)
+) -> StreamingResponse:
+    """Stream chat responses"""
+    async def generate():
+        try:
+            # Start with a simple message
+            yield "data: " + json.dumps({"type": "start"}) + "\n\n"
+            yield "data: " + json.dumps({"type": "content", "content": "Processing your request..."}) + "\n\n"
+            
+            # Process the actual chat stream
+            async for chunk in chat_service.process_chat_stream(
+                message=request.message,
+                session_id=request.session_id,
+                is_direct_query=getattr(request, 'is_direct_query', False),
+                dw_db=dw_db
+            ):
+                yield "data: " + json.dumps(chunk) + "\n\n"
+                
+        except Exception as e:
+            logger.error(f"Error in stream generation: {str(e)}")
+            logger.error(traceback.format_exc())
+            yield "data: " + json.dumps({"type": "error", "error": str(e)}) + "\n\n"
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+@app.post("/chat")
 async def chat(
     request: ChatRequest,
     dw_db: Session = Depends(get_dw_db)
@@ -197,119 +228,12 @@ async def chat(
         }
         return JSONResponse(content=error_response, status_code=500)
 
-@api_router.get("/chat/stream")
-@api_router.post("/chat/stream")
-async def stream_chat(request: ChatRequest, dw_db: Session = Depends(get_dw_db), chat_service: ChatService = Depends(get_chat_service), debug_service: DebugService = Depends(get_debug_service)):
-    """Stream a response from the chat service."""
-    try:
-        return StreamingResponse(
-            generate(chat_service, request, debug_service, dw_db),
-            media_type="text/event-stream"
-        )
-    except Exception as e:
-        logger.error(f"Error in stream_chat: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
-
-async def generate(chat_service: ChatService, request: ChatRequest, debug_service: DebugService, dw_db: Optional[Session] = None):
-    """Generate a streaming response from the chat service."""
-    try:
-        # Generate a message ID for this request
-        message_id = str(uuid.uuid4())
-        
-        async for response_chunk in chat_service.process_chat_stream(
-            message=request.message,
-            session_id=request.session_id,
-            is_direct_query=request.is_direct_query,
-            message_id=message_id,
-            dw_db=dw_db
-        ):
-            # Process response chunks to ensure all values are JSON serializable
-            if response_chunk.get("type") == "debug_info":
-                debug_info = response_chunk.get("debug_info", {})
-                # Convert debug_info to be JSON serializable 
-                debug_info = json_serialize_debug_info(debug_info)
-                response_chunk["debug_info"] = debug_info
-            
-            # Ensure visualization data is also JSON serializable
-            elif response_chunk.get("type") == "visualization":
-                visualization = response_chunk.get("visualization", {})
-                response_chunk["visualization"] = json_serialize_debug_info(visualization)
-            
-            # Ensure plotly_json data is properly serialized
-            elif response_chunk.get("type") == "plotly_json":
-                # The data should already be a JSON string, but make sure it's handled properly
-                data = response_chunk.get("data", {})
-                if not isinstance(data, str):
-                    # If it's not already a string, convert any non-serializable objects
-                    response_chunk["data"] = json_serialize_debug_info(data)
-                
-            # Yield the chunk as a server-sent event
-            yield f"data: {json.dumps(response_chunk)}\n\n"
-            
-    except Exception as e:
-        logger.error(f"Error in stream generation: {str(e)}")
-        logger.error(traceback.format_exc())
-        # Return an error message as a server-sent event
-        error_message = {"type": "error", "error": str(e)}
-        yield f"data: {json.dumps(error_message)}\n\n"
-
-def json_serialize_debug_info(debug_info: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure all values in the debug info are JSON serializable."""
-    serialized = {}
-
-    # Process each item in the debug info
-    for key, value in debug_info.items():
-        # Handle steps specially
-        if key == "steps":
-            serialized[key] = json_serialize_steps(value)
-        # Handle alternative suggestions specially
-        elif key == "alternative_suggestions" and isinstance(value, list):
-            # Ensure all suggestions are strings
-            serialized[key] = [str(suggestion) for suggestion in value]
-        # Handle other values
-        else:
-            serialized[key] = json_serialize_value(value)
-
-    return serialized
-
-def json_serialize_steps(steps):
-    """Serialize steps to ensure they are JSON serializable."""
-    if isinstance(steps, list):
-        return [json_serialize_step(step) for step in steps]
-    elif isinstance(steps, DebugStep):
-        return asdict(steps)
-    else:
-        return steps
-
-def json_serialize_step(step):
-    """Serialize a single step to ensure it's JSON serializable."""
-    if isinstance(step, DebugStep):
-        return asdict(step)
-    elif isinstance(step, dict):
-        return {k: json_serialize_value(v) for k, v in step.items()}
-    else:
-        return step
-
-def json_serialize_value(value):
-    """Serialize a single value to ensure it's JSON serializable."""
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    elif isinstance(value, decimal.Decimal):
-        return float(value)
-    else:
-        return value
-
-@api_router.get("/test")
-async def test_router():
-    return {"message": "Router endpoint working"}
-
-@api_router.get("/health")
+@app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "ok"}
 
-@api_router.get("/")
+@app.get("/")
 async def root():
     """Root endpoint"""
     return {"message": "Welcome to Tourism Analytics API"}
@@ -330,9 +254,6 @@ async def health():
 async def root_health_check():
     """Root health check endpoint"""
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
-
-# Include router in app
-app.include_router(api_router)
 
 if __name__ == "__main__":
     import uvicorn
