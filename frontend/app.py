@@ -1,3 +1,4 @@
+from visualization_service import StreamlitVisualizationService
 import streamlit as st
 import json
 import pandas as pd
@@ -25,7 +26,6 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import the visualization service
-from visualization_service import StreamlitVisualizationService
 
 # Set page config first thing
 st.set_page_config(
@@ -86,7 +86,7 @@ else:
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# --- Initialize session state ONCE --- 
+# --- Initialize session state ONCE ---
 if 'db_config' not in st.session_state:
     print("DEBUG app.py: Initializing st.session_state.db_config...")
     st.session_state.db_config = config.DB_CONFIG
@@ -126,8 +126,10 @@ if "show_raw_events" not in st.session_state:
 
 # --- API URL config ---
 # Always ensure api_url is set in session state
-st.session_state.api_url = config.API_URL.rstrip('/')  # Remove trailing slash if present
+st.session_state.api_url = config.API_URL.rstrip(
+    '/')  # Remove trailing slash if present
 print(f"DEBUG app.py: Ensuring API URL is set to {st.session_state.api_url}")
+
 
 def get_base_url():
     """Get the base URL"""
@@ -135,6 +137,7 @@ def get_base_url():
     if not base_url.startswith(('http://', 'https://')):
         base_url = f"http://{base_url}"
     return base_url
+
 
 def check_api_connection():
     """Check if the API is accessible"""
@@ -145,7 +148,8 @@ def check_api_connection():
             logger.info("API connection successful")
             return True
         else:
-            logger.error(f"API health check failed with status code: {response.status_code}")
+            logger.error(
+                f"API health check failed with status code: {response.status_code}")
             return False
     except requests.exceptions.ConnectionError:
         logger.error(f"Cannot connect to API at {base_url}")
@@ -158,6 +162,8 @@ def check_api_connection():
         return False
 
 # --- Define process_query function EARLY ---
+
+
 def process_query(query: str, use_streaming: bool = True):
     """Process a user query and display the result in the chat interface"""
     # Check if the query is already being processed
@@ -169,13 +175,13 @@ def process_query(query: str, use_streaming: bool = True):
     if not check_api_connection():
         st.error("Cannot connect to the API. Please check if the server is running.")
         return
-    
+
     # Reset processing state from any previous errors
     st.session_state.processing = False
-    
+
     # Add to processed queries
     st.session_state.processed_queries.add(query)
-    
+
     # Add user message to chat
     st.session_state.messages.append({"role": "user", "content": query})
 
@@ -185,7 +191,7 @@ def process_query(query: str, use_streaming: bool = True):
     # Generate a unique request ID
     request_id = str(uuid.uuid4())
     st.session_state.last_request_id = request_id
-        
+
     # Log the request
     logger.info(
         f"Processing query: '{query}' (request_id: {request_id}, streaming: {use_streaming})")
@@ -206,7 +212,7 @@ def process_query(query: str, use_streaming: bool = True):
                 headers={"Content-Type": "application/json"},
                 timeout=60
             )
-            
+
             if response.status_code == 200:
                 response_data = response.json()
                 st.session_state.messages.append({
@@ -215,8 +221,9 @@ def process_query(query: str, use_streaming: bool = True):
                     "request_id": request_id
                 })
             else:
-                st.error(f"Error: Server returned status code {response.status_code}")
-                
+                st.error(
+                    f"Error: Server returned status code {response.status_code}")
+
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
         logger.error(f"Error processing query: {str(e)}")
@@ -225,6 +232,8 @@ def process_query(query: str, use_streaming: bool = True):
         st.session_state.processing = False
 
 # --- Define streaming process function ---
+
+
 def process_streaming_query(query: str, request_id: str):
     """Process a query with streaming and update chat interface incrementally."""
     try:
@@ -233,14 +242,14 @@ def process_streaming_query(query: str, request_id: str):
         sql_container = st.empty()
         viz_container = st.empty()  # Single container for visualization
         debug_container = st.empty() if st.session_state.debug_mode else None
-        
+
         # Initialize message data
         current_message = {
             "role": "assistant",
             "content": "",
             "request_id": request_id
         }
-        
+
         # Start streaming request
         with requests.post(
             f"{st.session_state.api_url}/chat/stream",
@@ -256,25 +265,26 @@ def process_streaming_query(query: str, request_id: str):
             timeout=60
         ) as response:
             if response.status_code != 200:
-                raise Exception(f"API returned status code {response.status_code}")
-            
+                raise Exception(
+                    f"API returned status code {response.status_code}")
+
             client = sseclient.SSEClient(response)
-            
+
             # Process events
             for event in client.events():
                 if not event.data:
                     continue
-                
+
                 try:
                     data = json.loads(event.data)
                     event_type = data.get("type", "")
-                    
+
                     if event_type == "content":
                         content = data.get("content", "")
                         current_message["content"] += content
                         with content_container:
                             st.markdown(current_message["content"])
-                    
+
                     elif event_type == "sql_query":
                         sql_query = data.get("sql_query", "")
                         current_message["sql_query"] = sql_query
@@ -282,7 +292,7 @@ def process_streaming_query(query: str, request_id: str):
                             if st.session_state.debug_mode:
                                 with st.expander("View SQL Query"):
                                     st.code(sql_query, language="sql")
-                    
+
                     elif event_type == "visualization":
                         viz_data = data.get("visualization", {})
                         if viz_data:
@@ -293,20 +303,28 @@ def process_streaming_query(query: str, request_id: str):
                                         fig_data = viz_data.get("data", {})
                                         if fig_data:
                                             fig = go.Figure(fig_data)
-                                            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
+                                            st.plotly_chart(
+                                                fig, use_container_width=True, config={
+                                                    'displayModeBar': True})
                                     elif viz_data.get("type") == "table":
                                         # Display as table
-                                        df = pd.DataFrame(viz_data.get("data", []))
+                                        df = pd.DataFrame(
+                                            viz_data.get("data", []))
                                         if not df.empty:
-                                            st.dataframe(df, use_container_width=True)
+                                            st.dataframe(
+                                                df, use_container_width=True)
                                         else:
-                                            st.info("No data available for visualization")
+                                            st.info(
+                                                "No data available for visualization")
                                     else:
-                                        st.warning("Unsupported visualization type")
+                                        st.warning(
+                                            "Unsupported visualization type")
                             except Exception as e:
-                                st.error(f"Error displaying visualization: {str(e)}")
-                                logger.error(f"Visualization error: {str(e)}\nData: {viz_data}")
-                    
+                                st.error(
+                                    f"Error displaying visualization: {str(e)}")
+                                logger.error(
+                                    f"Visualization error: {str(e)}\nData: {viz_data}")
+
                     elif event_type == "debug":
                         if st.session_state.debug_mode and debug_container:
                             debug_info = data.get("debug_info", {})
@@ -314,28 +332,32 @@ def process_streaming_query(query: str, request_id: str):
                             with debug_container:
                                 with st.expander("Debug Info"):
                                     st.json(debug_info)
-                    
+
                     elif event_type == "end":
-                        # Add the final message to session state only if it has content
-                        if current_message.get("content") or current_message.get("visualization"):
+                        # Add the final message to session state only if it has
+                        # content
+                        if current_message.get(
+                                "content") or current_message.get("visualization"):
                             st.session_state.messages.append(current_message)
                         break
-                
+
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse event data: {e}")
                     continue
                 except Exception as e:
                     logger.error(f"Error processing event: {e}")
                     continue
-            
+
             # Clean up streaming client
             client.close()
-            
+
     except Exception as e:
         st.error(f"An unexpected error occurred: {str(e)}")
-        logger.error(f"Error in process_streaming_query: {str(e)}\n{traceback.format_exc()}")
+        logger.error(
+            f"Error in process_streaming_query: {str(e)}\n{traceback.format_exc()}")
     finally:
         st.session_state.processing = False
+
 
 def create_visualization(data, viz_type="auto"):
     """Create appropriate visualization based on data structure and type"""
@@ -351,16 +373,19 @@ def create_visualization(data, viz_type="auto"):
 
         # Get column types
         numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
-        date_cols = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+        date_cols = [
+            col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
         text_cols = df.select_dtypes(include=['object']).columns
 
         # Create tabs for different visualization options
-        tab1, tab2, tab3 = st.tabs(["📈 Main Chart", "📊 Alternative View", "📑 Data Table"])
-        
+        tab1, tab2, tab3 = st.tabs(
+            ["📈 Main Chart", "📊 Alternative View", "📑 Data Table"])
+
         with tab1:
             # Determine primary visualization type
             if viz_type == "auto":
-                if 'spending' in df.columns.str.lower().tolist() or 'amount' in df.columns.str.lower().tolist():
+                if 'spending' in df.columns.str.lower().tolist(
+                ) or 'amount' in df.columns.str.lower().tolist():
                     viz_type = "bar"
                 elif 'density' in df.columns.str.lower().tolist():
                     viz_type = "heatmap"
@@ -374,18 +399,19 @@ def create_visualization(data, viz_type="auto"):
             if viz_type == "line":
                 date_col = date_cols[0]
                 fig = px.line(
-                    df, 
+                    df,
                     x=date_col,
                     y=numeric_cols,
                     title="Time Series Analysis",
                     template="plotly_dark",
                     height=600  # Increased height
                 )
-                
+
                 # Enhanced line chart layout
                 fig.update_layout(
                     showlegend=True,
-                    margin=dict(l=60, r=40, t=80, b=60),  # Increased top margin for title
+                    # Increased top margin for title
+                    margin=dict(l=60, r=40, t=80, b=60),
                     plot_bgcolor='rgba(17, 17, 17, 0.1)',
                     paper_bgcolor='rgba(0,0,0,0)',
                     font=dict(size=14, color='white'),  # Increased font size
@@ -430,12 +456,18 @@ def create_visualization(data, viz_type="auto"):
                                 dict(
                                     label="Play",
                                     method="animate",
-                                    args=[None, {"frame": {"duration": 500, "redraw": True}, "fromcurrent": True}]
+                                    args=[
+                                        None, {
+                                            "frame": {
+                                                "duration": 500, "redraw": True}, "fromcurrent": True}]
                                 ),
                                 dict(
                                     label="Pause",
                                     method="animate",
-                                    args=[[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}]
+                                    args=[
+                                        [None], {
+                                            "frame": {
+                                                "duration": 0, "redraw": False}, "mode": "immediate"}]
                                 )
                             ],
                             x=0.1,
@@ -454,7 +486,7 @@ def create_visualization(data, viz_type="auto"):
                         )
                     ]
                 )
-                
+
                 # Enhanced line styling
                 for i in range(len(fig.data)):
                     fig.data[i].update(
@@ -477,7 +509,8 @@ def create_visualization(data, viz_type="auto"):
 
             elif viz_type == "bar":
                 if len(df.columns) >= 2:
-                    x_col = text_cols[0] if len(text_cols) > 0 else df.columns[0]
+                    x_col = text_cols[0] if len(
+                        text_cols) > 0 else df.columns[0]
                     y_cols = numeric_cols
                 else:
                     x_col = df.index
@@ -493,7 +526,7 @@ def create_visualization(data, viz_type="auto"):
                     barmode='group',
                     color_discrete_sequence=px.colors.qualitative.Set3
                 )
-                
+
                 fig.update_layout(
                     showlegend=True,
                     margin=dict(l=60, r=40, t=60, b=60),
@@ -577,7 +610,8 @@ def create_visualization(data, viz_type="auto"):
             st.subheader("Summary Statistics")
             if numeric_cols.any():
                 cols = st.columns(3)
-                for i, col in enumerate(numeric_cols[:3]):  # Show stats for up to 3 numeric columns
+                for i, col in enumerate(
+                        numeric_cols[:3]):  # Show stats for up to 3 numeric columns
                     with cols[i]:
                         st.metric(
                             f"{col}",
@@ -600,6 +634,7 @@ def create_visualization(data, viz_type="auto"):
     except Exception as e:
         st.error(f"Error creating visualization: {str(e)}")
         st.write("Debug: Full error:", traceback.format_exc())
+
 
 def display_rag_flow(steps: List[Dict[str, Any]],
                      visualization: Optional[str] = None):
@@ -647,7 +682,7 @@ def display_message(message: Dict[str, Any]) -> None:
     with st.chat_message(message["role"]):
         # Display the main content
         st.markdown(message.get("content", ""))
-        
+
         # For assistant messages, show additional info in a more organized way
         if message["role"] == "assistant":
             # Display visualization if present
@@ -656,15 +691,16 @@ def display_message(message: Dict[str, Any]) -> None:
                     viz_data = message["visualization"]
                     if viz_data.get("type") == "plotly_json":
                         # Create tabs for visualization and data
-                        viz_tab, data_tab = st.tabs(["📈 Visualization", "📊 Data"])
-                        
+                        viz_tab, data_tab = st.tabs(
+                            ["📈 Visualization", "📊 Data"])
+
                         with viz_tab:
                             # Parse the Plotly figure from JSON
                             fig_dict = viz_data.get("data", {})
                             if isinstance(fig_dict, str):
                                 fig_dict = json.loads(fig_dict)
                             fig = go.Figure(fig_dict)
-                            
+
                             # Update layout for dark theme and responsiveness
                             fig.update_layout(
                                 template="plotly_dark",
@@ -674,54 +710,65 @@ def display_message(message: Dict[str, Any]) -> None:
                                 plot_bgcolor="rgba(17,17,17,0.1)",
                                 font=dict(color="white")
                             )
-                            
+
                             # Display the Plotly chart
-                            st.plotly_chart(fig, use_container_width=True, config={
-                                'displayModeBar': True,
-                                'displaylogo': False,
-                                'scrollZoom': True
-                            })
-                        
+                            st.plotly_chart(
+                                fig,
+                                use_container_width=True,
+                                config={
+                                    'displayModeBar': True,
+                                    'displaylogo': False,
+                                    'scrollZoom': True})
+
                         with data_tab:
                             if "raw_data" in viz_data:
                                 df = pd.DataFrame(viz_data["raw_data"])
                                 st.dataframe(df, use_container_width=True)
-                    
+
                     elif viz_data.get("type") in ["table", "no_data"]:
                         st.write(viz_data.get("data", {}))
-                    
+
                     else:
                         # Fallback to DataFrame visualization
                         if isinstance(viz_data, (list, dict)):
-                            df = pd.DataFrame(viz_data if isinstance(viz_data, list) else [viz_data])
+                            df = pd.DataFrame(
+                                viz_data if isinstance(
+                                    viz_data, list) else [viz_data])
                             st.dataframe(df, use_container_width=True)
                         else:
                             st.write(viz_data)
-                            
+
                 except Exception as e:
                     st.error(f"Error displaying visualization: {str(e)}")
-                    logger.error(f"Visualization error: {str(e)}\nData: {viz_data}")
-            
+                    logger.error(
+                        f"Visualization error: {str(e)}\nData: {viz_data}")
+
             # Create columns for SQL and Debug toggles
-            if "sql_query" in message or ("debug_info" in message and st.session_state.debug_mode):
+            if "sql_query" in message or (
+                    "debug_info" in message and st.session_state.debug_mode):
                 col1, col2 = st.columns([1, 1])
-                
+
                 # SQL Query toggle
                 if "sql_query" in message:
                     with col1:
-                        if st.toggle("Show SQL Query", key=f"sql_{message.get('request_id', '')}"):
+                        if st.toggle(
+                            "Show SQL Query",
+                                key=f"sql_{message.get('request_id', '')}"):
                             st.code(message["sql_query"], language="sql")
-                
+
                 # Debug info toggle
                 if st.session_state.debug_mode and "debug_info" in message:
                     with col2:
-                        if st.toggle("Show Debug Info", key=f"debug_{message.get('request_id', '')}"):
+                        if st.toggle(
+                            "Show Debug Info",
+                                key=f"debug_{message.get('request_id', '')}"):
                             st.json(message["debug_info"])
+
 
 # Sidebar for chat history and settings
 with st.sidebar:
     st.title("💬 Chat History")
-    
+
     # New chat button
     if st.button("🆕 New Chat"):
         # Save current conversation if it exists
@@ -740,7 +787,7 @@ with st.sidebar:
         st.session_state.current_conversation_index = len(
             st.session_state.conversations)
         st.session_state.processed_queries = set()
-    
+
     # Display saved conversations
     for i, conv in enumerate(st.session_state.conversations):
         if st.button(
@@ -750,14 +797,14 @@ with st.sidebar:
             st.session_state.current_conversation_index = i
             # Reset processed queries when switching conversations
             st.session_state.processed_queries = set()
-    
+
     # Clear all chats button
     if st.button("🗑️ Clear All Chats"):
         st.session_state.messages = []
         st.session_state.conversations = []
         st.session_state.current_conversation_index = 0
         st.session_state.processed_queries = set()
-    
+
     st.markdown("---")
     st.markdown("### Settings")
     st.session_state.model = st.selectbox(
@@ -765,7 +812,7 @@ with st.sidebar:
         ["claude"],
         index=0
     )
-    
+
     # Add a debug mode toggle
     if st.checkbox("Debug Mode", value=False):
         st.write("Session State:")
@@ -775,15 +822,15 @@ with st.sidebar:
                     st.session_state.messages),
                 "conversations_count": len(
                     st.session_state.conversations),
-            "current_index": st.session_state.current_conversation_index,
-            "processing": st.session_state.processing,
+                "current_index": st.session_state.current_conversation_index,
+                "processing": st.session_state.processing,
                 "processed_queries": list(
                     st.session_state.processed_queries)[
                         :5] +
                 ["..."] if len(
                     st.session_state.processed_queries) > 5 else list(
                     st.session_state.processed_queries)})
-    
+
     st.markdown("---")
     st.markdown("### About")
     st.markdown("""
@@ -805,20 +852,26 @@ def main():
     # Create a container for status
     status_container = st.container()
     with status_container:
-        st.markdown('<div style="margin-bottom: 1rem;">', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="margin-bottom: 1rem;">',
+            unsafe_allow_html=True)
         if check_api_connection():
             st.success("API Connected ✅")
         else:
             st.error("API Unavailable ❌")
-            st.info("Please check if the backend server is running at: " + st.session_state.api_url)
+            st.info(
+                "Please check if the backend server is running at: " +
+                st.session_state.api_url)
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Add a separator after status
-    st.markdown('<hr style="margin: 0.5rem 0; border-color: #333;">', unsafe_allow_html=True)
+    st.markdown(
+        '<hr style="margin: 0.5rem 0; border-color: #333;">',
+        unsafe_allow_html=True)
 
     # Create a container for the main chat interface
     chat_container = st.container()
-    
+
     # Create a container for the input form
     input_container = st.container()
 
@@ -828,8 +881,9 @@ def main():
             with st.chat_message(message["role"]):
                 # Display the main content
                 st.markdown(message.get("content", ""))
-                
-                # For assistant messages, show additional info in a more organized way
+
+                # For assistant messages, show additional info in a more
+                # organized way
                 if message["role"] == "assistant":
                     # Display visualization if present
                     if "visualization" in message:
@@ -837,14 +891,16 @@ def main():
                             viz_data = message["visualization"]
                             if viz_data.get("type") == "plotly_json":
                                 # Create tabs for visualization and data
-                                viz_tab, data_tab = st.tabs(["📈 Visualization", "📊 Data"])
-                                
+                                viz_tab, data_tab = st.tabs(
+                                    ["📈 Visualization", "📊 Data"])
+
                                 with viz_tab:
                                     # Load the Plotly figure from JSON
                                     fig_dict = viz_data.get("data", {})
                                     fig = go.Figure(fig_dict)
-                                    
-                                    # Update layout for dark theme and responsiveness
+
+                                    # Update layout for dark theme and
+                                    # responsiveness
                                     fig.update_layout(
                                         template="plotly_dark",
                                         margin=dict(l=20, r=20, t=40, b=20),
@@ -853,40 +909,43 @@ def main():
                                         plot_bgcolor="rgba(17,17,17,0.1)",
                                         font=dict(color="white")
                                     )
-                                    
+
                                     # Display the Plotly chart
-                                    st.plotly_chart(fig, use_container_width=True, config={
-                                        'displayModeBar': True,
-                                        'displaylogo': False,
-                                        'scrollZoom': True
-                                    })
-                                
+                                    st.plotly_chart(
+                                        fig, use_container_width=True, config={
+                                            'displayModeBar': True, 'displaylogo': False, 'scrollZoom': True})
+
                                 with data_tab:
                                     if "raw_data" in viz_data:
                                         df = pd.DataFrame(viz_data["raw_data"])
-                                        st.dataframe(df, use_container_width=True)
-                            
+                                        st.dataframe(
+                                            df, use_container_width=True)
+
                             elif viz_data.get("type") in ["table", "no_data"]:
                                 st.write(viz_data.get("data", {}))
-                                
+
                         except Exception as e:
-                            st.error(f"Error displaying visualization: {str(e)}")
+                            st.error(
+                                f"Error displaying visualization: {str(e)}")
                             logger.error(f"Visualization error: {str(e)}")
-                    
+
                     # Create columns for SQL and Debug toggles
                     if "sql_query" in message or st.session_state.debug_mode:
                         col1, col2 = st.columns([1, 1])
-                        
+
                         # SQL Query toggle
                         if "sql_query" in message:
                             with col1:
-                                if st.toggle("Show SQL Query", key=f"sql_{message.get('request_id', '')}"):
-                                    st.code(message["sql_query"], language="sql")
-                        
+                                if st.toggle(
+                                        "Show SQL Query", key=f"sql_{message.get('request_id', '')}"):
+                                    st.code(
+                                        message["sql_query"], language="sql")
+
                         # Debug info toggle
                         if st.session_state.debug_mode and "debug_info" in message:
                             with col2:
-                                if st.toggle("Show Debug Info", key=f"debug_{message.get('request_id', '')}"):
+                                if st.toggle(
+                                        "Show Debug Info", key=f"debug_{message.get('request_id', '')}"):
                                     st.json(message["debug_info"])
 
         # Show loading animation when processing
@@ -925,14 +984,13 @@ def main():
     st.markdown("### Example Questions")
     example_questions = [
         "Show me the daily visitor trend in July 2023 with a line chart",
-        "Compare Swiss vs foreign tourists by month in 2023 using a bar chart", 
+        "Compare Swiss vs foreign tourists by month in 2023 using a bar chart",
         "Create a pie chart of spending distribution across different industries",
         "Plot the top 5 countries by visitor count in summer 2023 as a bar chart",
         "Show weekly visitor trends for spring 2023 as a line graph",
         "Create a heatmap of spending patterns across different regions",
         "Plot visitor distribution by origin for each month in 2023",
-        "Visualize daily visitor patterns during July-August 2023 with a line chart"
-    ]
+        "Visualize daily visitor patterns during July-August 2023 with a line chart"]
 
     # Display examples in a grid of buttons at the bottom
     cols = st.columns(4)
@@ -940,7 +998,9 @@ def main():
         with cols[i % 4]:
             if st.button(q, key=f"example_{i}", use_container_width=True):
                 st.session_state.processing = True  # Set processing flag
-                process_query(q, use_streaming=True)  # Force streaming for better visualization handling
+                # Force streaming for better visualization handling
+                process_query(q, use_streaming=True)
+
 
 # Entry point - call the main function
 if __name__ == "__main__":

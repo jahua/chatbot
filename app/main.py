@@ -42,7 +42,8 @@ logging.basicConfig(
 # Add file handler
 file_handler = logging.FileHandler(log_file)
 file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
 # Get logger
 logger = logging.getLogger(__name__)
@@ -68,44 +69,46 @@ app.add_middleware(
 chat_service = None
 debug_service = None
 
+
 @app.on_event("startup")
 async def startup_event():
     global chat_service, debug_service
     try:
         logger.info("Starting up chat service...")
-        
+
         # Get database session for initialization
         dw_db = next(get_dw_db())
         logger.info("Database session created")
-        
+
         # Initialize schema service (fetches live schema)
-        schema_service = SchemaService() 
+        schema_service = SchemaService()
         logger.info("Schema service initialized")
-        
+
         # Initialize DW context service
         dw_context_service = DWContextService(dw_db=dw_db)
         logger.info("DW context service initialized")
-        
+
         # Initialize OpenAI adapter
         llm_adapter = OpenAIAdapter()
         logger.info("OpenAI adapter initialized")
-        
+
         # Initialize debug service
         debug_service = DebugService()
         logger.info("Debug service initialized")
-        
+
         # Initialize chat service with the updated constructor signature
         chat_service = ChatService(
             schema_service=schema_service,
             dw_context_service=dw_context_service,
             llm_adapter=llm_adapter
         )
-        
+
         logger.info("Chat service initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing chat service: {str(e)}")
         logger.error(traceback.format_exc())
         raise
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -123,26 +126,34 @@ async def shutdown_event():
             logger.error(traceback.format_exc())
 
 # Dependency functions for FastAPI
+
+
 def get_chat_service() -> ChatService:
     """Dependency that returns the global chat service instance."""
     if chat_service is None:
         logger.error("Chat service not initialized")
-        raise HTTPException(status_code=503, detail="Chat service not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail="Chat service not initialized")
     return chat_service
+
 
 def get_debug_service() -> DebugService:
     """Dependency that returns the global debug service instance."""
     if debug_service is None:
         logger.error("Debug service not initialized")
-        raise HTTPException(status_code=503, detail="Debug service not initialized")
+        raise HTTPException(status_code=503,
+                            detail="Debug service not initialized")
     return debug_service
+
 
 def prepare_debug_info(debug_info):
     """Prepare debug info for JSON serialization by converting DebugStep objects to dictionaries."""
     if not debug_info:
         return debug_info
-        
-    # If there's a steps key, ensure all steps are dictionaries, not DebugStep objects
+
+    # If there's a steps key, ensure all steps are dictionaries, not DebugStep
+    # objects
     if "steps" in debug_info:
         # Handle case where steps is a single DebugStep object
         if isinstance(debug_info["steps"], DebugStep):
@@ -152,10 +163,12 @@ def prepare_debug_info(debug_info):
             # Convert each step to a dictionary if it's not already
             for i, step in enumerate(debug_info["steps"]):
                 if isinstance(step, DebugStep):
-                    # If the step is a DebugStep object, convert it to dict using asdict
+                    # If the step is a DebugStep object, convert it to dict
+                    # using asdict
                     debug_info["steps"][i] = asdict(step)
-    
+
     return debug_info
+
 
 @app.post("/chat/stream")
 async def stream_chat(
@@ -170,7 +183,7 @@ async def stream_chat(
             # Start with a simple message
             yield "data: " + json.dumps({"type": "start"}) + "\n\n"
             yield "data: " + json.dumps({"type": "content", "content": "Processing your request..."}) + "\n\n"
-            
+
             # Process the actual chat stream
             async for chunk in chat_service.process_chat_stream(
                 message=request.message,
@@ -179,12 +192,12 @@ async def stream_chat(
                 dw_db=dw_db
             ):
                 yield "data: " + json.dumps(chunk) + "\n\n"
-                
+
         except Exception as e:
             logger.error(f"Error in stream generation: {str(e)}")
             logger.error(traceback.format_exc())
             yield "data: " + json.dumps({"type": "error", "error": str(e)}) + "\n\n"
-    
+
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
@@ -195,6 +208,7 @@ async def stream_chat(
         }
     )
 
+
 @app.post("/chat")
 async def chat(
     request: ChatRequest,
@@ -203,21 +217,23 @@ async def chat(
     """Process chat messages"""
     try:
         logger.info(f"Received chat request: {request.message}")
-        
+
         if not chat_service:
             logger.error("Chat service not initialized")
-            raise HTTPException(status_code=503, detail="Chat service not initialized")
-        
+            raise HTTPException(
+                status_code=503,
+                detail="Chat service not initialized")
+
         # For now, create a simplified response with just the message
         response = {
-            "message_id": str(uuid.uuid4()),
+            "message_id": str(
+                uuid.uuid4()),
             "message": request.message,
             "content": "This is a simplified response while we debug the issue.",
-            "status": "success"
-        }
-        
+            "status": "success"}
+
         return JSONResponse(content=response)
-        
+
     except Exception as e:
         logger.error(f"Error processing chat request: {str(e)}")
         logger.error(traceback.format_exc())
@@ -228,27 +244,33 @@ async def chat(
         }
         return JSONResponse(content=error_response, status_code=500)
 
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "ok"}
+
 
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {"message": "Welcome to Tourism Analytics API"}
 
+
 @app.get("/test")
 async def test():
     return {"message": "Test endpoint working"}
+
 
 @app.get("/test-app")
 async def test_app():
     return {"message": "App endpoint working"}
 
+
 @app.get("/api/v1/health")
 async def health():
     return {"status": "ok"}
+
 
 @app.get("/health")
 async def root_health_check():
@@ -257,4 +279,4 @@ async def root_health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
