@@ -170,6 +170,9 @@ def process_query(query: str, use_streaming: bool = True):
         st.error("Cannot connect to the API. Please check if the server is running.")
         return
     
+    # Reset processing state from any previous errors
+    st.session_state.processing = False
+    
     # Add to processed queries
     st.session_state.processed_queries.add(query)
     
@@ -187,53 +190,39 @@ def process_query(query: str, use_streaming: bool = True):
     logger.info(
         f"Processing query: '{query}' (request_id: {request_id}, streaming: {use_streaming})")
 
-    # Use streaming process if enabled
-    if use_streaming:
-        process_streaming_query(query, request_id)
-        return
-
-    # Non-streaming process (fallback or user preference)
     try:
-        # Make the API request to the backend
-        api_endpoint = f"{st.session_state.api_url}/chat"
-        logger.debug(f"Sending request to {api_endpoint}")
-        response = requests.post(
-            api_endpoint,
-            json={
-                "message": query,
-                "session_id": st.session_state.current_chat_id
-            },
-            headers={"Content-Type": "application/json"},
-            timeout=60
-        )
-        
-        # Process the response
-        if response.status_code == 200:
-            response_data = response.json()
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response_data.get("content", "No response content"),
-                "request_id": request_id
-            })
+        # Use streaming process if enabled
+        if use_streaming:
+            process_streaming_query(query, request_id)
         else:
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": f"Error: Server returned status code {response.status_code}",
-                "request_id": request_id
-            })
-    except requests.RequestException as e:
-        logger.error(f"Error connecting to server: {str(e)}")
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": "Sorry, I couldn't connect to the server. Please try again later.",
-            "request_id": request_id
-        })
+            # Non-streaming process
+            api_endpoint = f"{st.session_state.api_url}/chat"
+            response = requests.post(
+                api_endpoint,
+                json={
+                    "message": query,
+                    "session_id": st.session_state.current_chat_id
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                response_data = response.json()
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response_data.get("content", "No response content"),
+                    "request_id": request_id
+                })
+            else:
+                st.error(f"Error: Server returned status code {response.status_code}")
+                
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        logger.error(f"Error processing query: {str(e)}")
     finally:
         # Reset processing flag
         st.session_state.processing = False
-        # Force a rerun to update the UI immediately
-        st.rerun()
-# --- END Define process_query function ---
 
 # --- Define streaming process function ---
 def process_streaming_query(query: str, request_id: str):
@@ -294,121 +283,42 @@ def process_streaming_query(query: str, request_id: str):
                                 with st.expander("View SQL Query"):
                                     st.code(sql_query, language="sql")
                     
-                    elif event_type in ["visualization", "sql_results"]:
-                        viz_data = data.get("visualization", {}) if event_type == "visualization" else data.get("sql_results", {})
+                    elif event_type == "visualization":
+                        viz_data = data.get("visualization", {})
                         if viz_data:
-                            current_message["visualization"] = viz_data
-                            with viz_container:
-                                if isinstance(viz_data, dict):
-                                    data_to_viz = viz_data.get("data", viz_data)
-                                else:
-                                    data_to_viz = viz_data
-                                    
-                                # Convert data to DataFrame
-                                if isinstance(data_to_viz, list) and len(data_to_viz) > 0:
-                                    df = pd.DataFrame(data_to_viz)
-                                    
-                                    # Check for time/date columns
-                                    date_cols = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
-                                    numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
-                                    
-                                    if date_cols and numeric_cols.any():
-                                        # Create enhanced line chart for time series data
-                                        date_col = date_cols[0]
-                                        fig = px.line(df, x=date_col, y=numeric_cols, 
-                                                    title="Visitor Trends",
-                                                    template="plotly_dark",
-                                                    height=500)
-                                        
-                                        # Enhanced layout settings
-                                        fig.update_layout(
-                                            xaxis_title="Date",
-                                            yaxis_title="Number of Visitors",
-                                            showlegend=True,
-                                            margin=dict(l=60, r=40, t=60, b=60),
-                                            plot_bgcolor='rgba(17, 17, 17, 0.1)',
-                                            paper_bgcolor='rgba(0,0,0,0)',
-                                            font=dict(
-                                                size=13,
-                                                color='white'
-                                            ),
-                                            title=dict(
-                                                font=dict(size=16),
-                                                x=0.5,
-                                                xanchor='center'
-                                            ),
-                                            legend=dict(
-                                                yanchor="top",
-                                                y=0.99,
-                                                xanchor="left",
-                                                x=0.01,
-                                                bgcolor='rgba(0,0,0,0.3)',
-                                                bordercolor='rgba(255,255,255,0.2)',
-                                                borderwidth=1
-                                            ),
-                                            xaxis=dict(
-                                                gridcolor='rgba(255,255,255,0.1)',
-                                                showgrid=True,
-                                                tickfont=dict(size=12)
-                                            ),
-                                            yaxis=dict(
-                                                gridcolor='rgba(255,255,255,0.1)',
-                                                showgrid=True,
-                                                tickfont=dict(size=12),
-                                                tickformat=',.0f'  # Format large numbers without decimals
-                                            )
-                                        )
-                                        
-                                        # Enhanced trace settings
-                                        fig.update_traces(
-                                            line=dict(width=3),  # Thicker lines
-                                            mode='lines+markers',  # Add markers
-                                            marker=dict(
-                                                size=8,
-                                                line=dict(width=2, color='rgba(255,255,255,0.8)')
-                                            ),
-                                            hovertemplate="<b>Date:</b> %{x}<br>" +
-                                                         "<b>Visitors:</b> %{y:,.0f}<br>" +
-                                                         "<extra></extra>"  # Clean hover label
-                                        )
-                                        
-                                        # Display the plot
-                                        st.plotly_chart(fig, use_container_width=True, config={
-                                            'displayModeBar': True,
-                                            'displaylogo': False,
-                                            'modeBarButtonsToRemove': ['lasso2d', 'select2d']
-                                        })
-                                        
-                                        # Show summary statistics
-                                        with st.expander("View Summary Statistics"):
-                                            col1, col2, col3 = st.columns(3)
-                                            numeric_data = df[numeric_cols[0]]  # Assuming first numeric column
-                                            with col1:
-                                                st.metric("Average", f"{numeric_data.mean():,.0f}")
-                                            with col2:
-                                                st.metric("Maximum", f"{numeric_data.max():,.0f}")
-                                            with col3:
-                                                st.metric("Minimum", f"{numeric_data.min():,.0f}")
-                                            
-                                            # Show raw data in a clean table
-                                            st.dataframe(
-                                                df.style.format({
-                                                    numeric_cols[0]: '{:,.0f}'.format
-                                                }),
-                                                use_container_width=True
-                                            )
+                            try:
+                                with viz_container:
+                                    if viz_data.get("type") == "plotly_json":
+                                        # Parse the Plotly figure data
+                                        fig_data = viz_data.get("data", {})
+                                        if fig_data:
+                                            fig = go.Figure(fig_data)
+                                            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
+                                    elif viz_data.get("type") == "table":
+                                        # Display as table
+                                        df = pd.DataFrame(viz_data.get("data", []))
+                                        if not df.empty:
+                                            st.dataframe(df, use_container_width=True)
+                                        else:
+                                            st.info("No data available for visualization")
                                     else:
-                                        # For non-time series data, show as a styled table
-                                        st.dataframe(
-                                            df.style.format({
-                                                col: '{:,.0f}'.format for col in numeric_cols
-                                            }),
-                                            use_container_width=True
-                                        )
+                                        st.warning("Unsupported visualization type")
+                            except Exception as e:
+                                st.error(f"Error displaying visualization: {str(e)}")
+                                logger.error(f"Visualization error: {str(e)}\nData: {viz_data}")
+                    
+                    elif event_type == "debug":
+                        if st.session_state.debug_mode and debug_container:
+                            debug_info = data.get("debug_info", {})
+                            current_message["debug_info"] = debug_info
+                            with debug_container:
+                                with st.expander("Debug Info"):
+                                    st.json(debug_info)
                     
                     elif event_type == "end":
-                        # Add the final message to session state
-                        st.session_state.messages.append(current_message)
+                        # Add the final message to session state only if it has content
+                        if current_message.get("content") or current_message.get("visualization"):
+                            st.session_state.messages.append(current_message)
                         break
                 
                 except json.JSONDecodeError as e:
@@ -469,18 +379,19 @@ def create_visualization(data, viz_type="auto"):
                     y=numeric_cols,
                     title="Time Series Analysis",
                     template="plotly_dark",
-                    height=500
+                    height=600  # Increased height
                 )
                 
                 # Enhanced line chart layout
                 fig.update_layout(
                     showlegend=True,
-                    margin=dict(l=60, r=40, t=60, b=60),
+                    margin=dict(l=60, r=40, t=80, b=60),  # Increased top margin for title
                     plot_bgcolor='rgba(17, 17, 17, 0.1)',
                     paper_bgcolor='rgba(0,0,0,0)',
-                    font=dict(size=13, color='white'),
+                    font=dict(size=14, color='white'),  # Increased font size
                     title=dict(
-                        font=dict(size=18, color='white'),
+                        text="<b>Time Series Analysis</b>",  # Bold title
+                        font=dict(size=20, color='white'),  # Larger title
                         x=0.5,
                         xanchor='center'
                     ),
@@ -492,21 +403,24 @@ def create_visualization(data, viz_type="auto"):
                         bgcolor='rgba(0,0,0,0.3)',
                         bordercolor='rgba(255,255,255,0.2)',
                         borderwidth=1,
-                        font=dict(size=12)
+                        font=dict(size=13)
                     ),
                     xaxis=dict(
                         gridcolor='rgba(255,255,255,0.1)',
                         showgrid=True,
-                        title_font=dict(size=14),
-                        tickfont=dict(size=12),
-                        rangeslider=dict(visible=True)  # Add range slider
+                        title_font=dict(size=16),
+                        tickfont=dict(size=13),
+                        rangeslider=dict(visible=True),
+                        title="<b>Date</b>"  # Bold axis title
                     ),
                     yaxis=dict(
                         gridcolor='rgba(255,255,255,0.1)',
                         showgrid=True,
-                        title_font=dict(size=14),
-                        tickfont=dict(size=12),
-                        tickformat=',.0f'
+                        title_font=dict(size=16),
+                        tickfont=dict(size=13),
+                        tickformat=',.0f',
+                        title="<b>Value</b>",  # Bold axis title
+                        rangemode='tozero'  # Start y-axis from 0
                     ),
                     updatemenus=[
                         dict(
@@ -527,20 +441,39 @@ def create_visualization(data, viz_type="auto"):
                             x=0.1,
                             y=1.1,
                         )
+                    ],
+                    annotations=[
+                        dict(
+                            text="Click and drag to zoom, double-click to reset",
+                            showarrow=False,
+                            x=0.5,
+                            y=1.08,
+                            xref='paper',
+                            yref='paper',
+                            font=dict(size=12, color='rgba(255,255,255,0.6)')
+                        )
                     ]
                 )
                 
-                fig.update_traces(
-                    line=dict(width=3),
-                    mode='lines+markers',
-                    marker=dict(
-                        size=8,
-                        line=dict(width=2, color='rgba(255,255,255,0.8)')
-                    ),
-                    hovertemplate="<b>Date:</b> %{x}<br>" +
-                                "<b>Value:</b> %{y:,.0f}<br>" +
-                                "<extra></extra>"
-                )
+                # Enhanced line styling
+                for i in range(len(fig.data)):
+                    fig.data[i].update(
+                        line=dict(
+                            width=3,
+                            dash=None if i == 0 else ['solid', 'dash', 'dot', 'dashdot'][i % 4]
+                        ),
+                        mode='lines+markers',
+                        marker=dict(
+                            size=8,
+                            symbol=['circle', 'diamond', 'square', 'triangle-up'][i % 4],
+                            line=dict(width=2, color='rgba(255,255,255,0.8)')
+                        ),
+                        hovertemplate=(
+                            f"<b>Date:</b> %{{x}}<br>"
+                            f"<b>{fig.data[i].name}:</b> %{{y:,.0f}}<br>"
+                            "<extra></extra>"
+                        )
+                    )
 
             elif viz_type == "bar":
                 if len(df.columns) >= 2:
@@ -715,16 +648,75 @@ def display_message(message: Dict[str, Any]) -> None:
         # Display the main content
         st.markdown(message.get("content", ""))
         
-        # Display SQL query if present
-        if "sql_query" in message:
-            with st.expander("View SQL Query"):
-                st.code(message["sql_query"], language="sql")
-        
-        # Display debug info if present and debug mode is enabled
-        if st.session_state.get("debug_mode", False) and "debug_info" in message:
-            with st.expander("Debug Info"):
-                st.json(message["debug_info"])
-
+        # For assistant messages, show additional info in a more organized way
+        if message["role"] == "assistant":
+            # Display visualization if present
+            if "visualization" in message:
+                try:
+                    viz_data = message["visualization"]
+                    if viz_data.get("type") == "plotly_json":
+                        # Create tabs for visualization and data
+                        viz_tab, data_tab = st.tabs(["📈 Visualization", "📊 Data"])
+                        
+                        with viz_tab:
+                            # Parse the Plotly figure from JSON
+                            fig_dict = viz_data.get("data", {})
+                            if isinstance(fig_dict, str):
+                                fig_dict = json.loads(fig_dict)
+                            fig = go.Figure(fig_dict)
+                            
+                            # Update layout for dark theme and responsiveness
+                            fig.update_layout(
+                                template="plotly_dark",
+                                margin=dict(l=20, r=20, t=40, b=20),
+                                height=500,
+                                paper_bgcolor="rgba(0,0,0,0)",
+                                plot_bgcolor="rgba(17,17,17,0.1)",
+                                font=dict(color="white")
+                            )
+                            
+                            # Display the Plotly chart
+                            st.plotly_chart(fig, use_container_width=True, config={
+                                'displayModeBar': True,
+                                'displaylogo': False,
+                                'scrollZoom': True
+                            })
+                        
+                        with data_tab:
+                            if "raw_data" in viz_data:
+                                df = pd.DataFrame(viz_data["raw_data"])
+                                st.dataframe(df, use_container_width=True)
+                    
+                    elif viz_data.get("type") in ["table", "no_data"]:
+                        st.write(viz_data.get("data", {}))
+                    
+                    else:
+                        # Fallback to DataFrame visualization
+                        if isinstance(viz_data, (list, dict)):
+                            df = pd.DataFrame(viz_data if isinstance(viz_data, list) else [viz_data])
+                            st.dataframe(df, use_container_width=True)
+                        else:
+                            st.write(viz_data)
+                            
+                except Exception as e:
+                    st.error(f"Error displaying visualization: {str(e)}")
+                    logger.error(f"Visualization error: {str(e)}\nData: {viz_data}")
+            
+            # Create columns for SQL and Debug toggles
+            if "sql_query" in message or ("debug_info" in message and st.session_state.debug_mode):
+                col1, col2 = st.columns([1, 1])
+                
+                # SQL Query toggle
+                if "sql_query" in message:
+                    with col1:
+                        if st.toggle("Show SQL Query", key=f"sql_{message.get('request_id', '')}"):
+                            st.code(message["sql_query"], language="sql")
+                
+                # Debug info toggle
+                if st.session_state.debug_mode and "debug_info" in message:
+                    with col2:
+                        if st.toggle("Show Debug Info", key=f"debug_{message.get('request_id', '')}"):
+                            st.json(message["debug_info"])
 
 # Sidebar for chat history and settings
 with st.sidebar:
@@ -839,6 +831,48 @@ def main():
                 
                 # For assistant messages, show additional info in a more organized way
                 if message["role"] == "assistant":
+                    # Display visualization if present
+                    if "visualization" in message:
+                        try:
+                            viz_data = message["visualization"]
+                            if viz_data.get("type") == "plotly_json":
+                                # Create tabs for visualization and data
+                                viz_tab, data_tab = st.tabs(["📈 Visualization", "📊 Data"])
+                                
+                                with viz_tab:
+                                    # Load the Plotly figure from JSON
+                                    fig_dict = viz_data.get("data", {})
+                                    fig = go.Figure(fig_dict)
+                                    
+                                    # Update layout for dark theme and responsiveness
+                                    fig.update_layout(
+                                        template="plotly_dark",
+                                        margin=dict(l=20, r=20, t=40, b=20),
+                                        height=500,
+                                        paper_bgcolor="rgba(0,0,0,0)",
+                                        plot_bgcolor="rgba(17,17,17,0.1)",
+                                        font=dict(color="white")
+                                    )
+                                    
+                                    # Display the Plotly chart
+                                    st.plotly_chart(fig, use_container_width=True, config={
+                                        'displayModeBar': True,
+                                        'displaylogo': False,
+                                        'scrollZoom': True
+                                    })
+                                
+                                with data_tab:
+                                    if "raw_data" in viz_data:
+                                        df = pd.DataFrame(viz_data["raw_data"])
+                                        st.dataframe(df, use_container_width=True)
+                            
+                            elif viz_data.get("type") in ["table", "no_data"]:
+                                st.write(viz_data.get("data", {}))
+                                
+                        except Exception as e:
+                            st.error(f"Error displaying visualization: {str(e)}")
+                            logger.error(f"Visualization error: {str(e)}")
+                    
                     # Create columns for SQL and Debug toggles
                     if "sql_query" in message or st.session_state.debug_mode:
                         col1, col2 = st.columns([1, 1])

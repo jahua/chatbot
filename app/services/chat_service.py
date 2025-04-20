@@ -771,3 +771,42 @@ Tables:
                 fixed_query = cte_part + main_part
 
         return fixed_query
+
+    # For spending patterns query
+    def get_spending_patterns_query(self):
+        return """
+        SELECT 
+            d.full_date,
+            r.region_name,
+            SUM(s.total_amount) as total_spending
+        FROM dw.fact_spending s
+        JOIN dw.dim_date d ON s.date_id = d.date_id
+        JOIN dw.dim_region r ON s.region_id = r.region_id
+        WHERE r.country_code = 'CH'
+        GROUP BY d.full_date, r.region_name
+        ORDER BY d.full_date, total_spending DESC;
+        """
+
+    # For visitor density query
+    def get_visitor_density_query(self):
+        return """
+        WITH region_stats AS (
+            SELECT 
+                r.canton_code,
+                r.region_name,
+                r.population,
+                SUM(f.total_visitors) AS total_visitors
+            FROM dw.fact_visitor f
+            JOIN dw.dim_region r ON f.region_id = r.region_id
+            WHERE r.population > 0
+            GROUP BY r.canton_code, r.region_name, r.population
+        )
+        SELECT 
+            canton_code,
+            region_name,
+            total_visitors,
+            ROUND((total_visitors::float / NULLIF(population, 0))::numeric, 2) AS visitor_density
+        FROM region_stats
+        ORDER BY visitor_density DESC
+        LIMIT 10;
+        """

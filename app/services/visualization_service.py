@@ -18,6 +18,118 @@ from plotly.utils import PlotlyJSONEncoder
 
 logger = logging.getLogger(__name__)
 
+class StreamlitVisualizationService:
+    def __init__(self):
+        self.chart_cache = {}
+
+    def create_visualization(self, data: Any, context: str = "") -> Optional[Dict[str, Any]]:
+        """Create visualization based on data type and context."""
+        try:
+            # Convert data to DataFrame if needed
+            if isinstance(data, list) and len(data) > 0:
+                df = pd.DataFrame(data)
+            elif isinstance(data, dict):
+                df = pd.DataFrame([data])
+            else:
+                return None
+
+            # Get column types
+            numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+            date_cols = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+            text_cols = df.select_dtypes(include=['object']).columns
+
+            # Determine chart type based on data structure and context
+            if len(df.columns) == 2 and len(numeric_cols) == 1:
+                # Create pie chart for distribution data
+                fig = px.pie(
+                    df,
+                    values=numeric_cols[0],
+                    names=df.columns[0] if df.columns[0] != numeric_cols[0] else df.columns[1],
+                    title="Distribution Analysis",
+                    template="plotly_dark",
+                    hole=0.4
+                )
+                chart_type = "pie"
+            
+            elif date_cols and numeric_cols.any():
+                # Create line chart for time series
+                date_col = date_cols[0]
+                fig = px.line(
+                    df,
+                    x=date_col,
+                    y=numeric_cols,
+                    title="Time Series Analysis",
+                    template="plotly_dark"
+                )
+                chart_type = "line"
+            
+            elif len(numeric_cols) >= 1 and len(text_cols) >= 1:
+                # Create bar chart for categorical comparison
+                fig = px.bar(
+                    df,
+                    x=text_cols[0],
+                    y=numeric_cols[0],
+                    title="Comparative Analysis",
+                    template="plotly_dark"
+                )
+                chart_type = "bar"
+            
+            else:
+                # Default to table view
+                return {"type": "table", "data": df.to_dict('records')}
+
+            # Enhance chart appearance
+            fig.update_layout(
+                height=500,
+                margin=dict(l=60, r=40, t=60, b=60),
+                plot_bgcolor='rgba(17, 17, 17, 0.1)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(size=13, color='white'),
+                title=dict(
+                    font=dict(size=16),
+                    x=0.5,
+                    xanchor='center'
+                ),
+                showlegend=True,
+                legend=dict(
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="left",
+                    x=0.01,
+                    bgcolor='rgba(0,0,0,0.3)',
+                    bordercolor='rgba(255,255,255,0.2)',
+                    borderwidth=1
+                )
+            )
+
+            # Add interactive features
+            fig.update_traces(
+                hovertemplate="<b>%{x}</b><br>Value: %{y:,.0f}<br><extra></extra>"
+            )
+
+            # Cache the visualization
+            cache_key = f"{context}_{len(data)}"
+            self.chart_cache[cache_key] = {
+                "type": chart_type,
+                "figure": fig.to_json(),
+                "data": df.to_dict('records')
+            }
+
+            return {
+                "type": chart_type,
+                "figure": fig.to_json(),
+                "data": df.to_dict('records')
+            }
+
+        except Exception as e:
+            print(f"Error creating visualization: {str(e)}")
+            return None
+
+    def get_cached_visualization(self, context: str, data_length: int) -> Optional[Dict[str, Any]]:
+        """Retrieve cached visualization if available."""
+        cache_key = f"{context}_{data_length}"
+        return self.chart_cache.get(cache_key)
+
 class VisualizationService:
     def __init__(self, debug_service: Optional[DebugService] = None):
         """Initialize VisualizationService with optional debug service"""
@@ -166,12 +278,12 @@ class VisualizationService:
             # Time series pattern: Date column + numeric columns with many rows
             if date_cols and numeric_cols and num_rows > 5:
                 # Time series analysis
-                return "simple_line"
+                return "time_series"
                 
             # Comparison pattern: Few categorical items with numeric values
             if categorical_cols and numeric_cols and len(df[categorical_cols[0]].unique()) <= 10 and num_rows <= 15:
                 # Comparison across categories
-                return "simple_bar"
+                return "bar"
                 
             # Distribution pattern: Single categorical with percentages or counts
             if (len(categorical_cols) == 1 and len(numeric_cols) == 1 and 
@@ -236,156 +348,201 @@ class VisualizationService:
         
         if (date_cols and any(term in query_lower for term in time_trend_indicators)) or \
            any(col for col in data.columns if "date" in str(col).lower() or "time" in str(col).lower() or "year" in str(col).lower()):
-            return "simple_line"
+            return "time_series"
         
         # Check for categorical comparisons
         comparison_indicators = ["compare", "comparison", "versus", "vs", "difference", "ranking", "rank", "top", "bottom"]
         if (len(numeric_cols) >= 1 and num_cols <= 10 and num_rows <= 20) or \
            any(term in query_lower for term in comparison_indicators):
-            return "simple_bar"
+            return "bar"
         
         # Default visualization based on data characteristics
         if num_rows <= 20 and num_cols <= 10:
             return "table"
         
         if len(numeric_cols) >= 1 and len(data.columns) <= 10:
-            return "simple_bar"
+            return "bar"
         
         # Fallback to table for complex data
         return "table"
     
     def _create_time_series(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
-        """Create a time series visualization"""
+        """Create a time series visualization."""
         try:
-            # Find date/time columns
-            time_cols = [col for col in df.columns if self._is_date_column(df[col])]
+            # Identify date and numeric columns
+            date_cols = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+            numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
             
-            if not time_cols:
-                logger.warning("No time columns found for time series")
-                return self._create_default_visualization(df, query)
+            if not date_cols or len(numeric_cols) == 0:
+                raise ValueError("Missing required date or numeric columns for time series")
             
-            # Use the first time column as x-axis
-            x_col = time_cols[0]
-            
-            # Find numeric columns for y-axis
-            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-            numeric_cols = [col for col in numeric_cols if col != x_col]
-            
-            if not numeric_cols:
-                logger.warning("No numeric columns found for time series")
-                return self._create_default_visualization(df, query)
-            
-            # Use the first numeric column as y-axis
-            y_col = numeric_cols[0]
-            
-            # Create the plot
-            fig = px.line(df, x=x_col, y=y_col, title=f"{y_col} over {x_col}")
-            
-            # Add markers for better visibility
-            fig.update_traces(mode='lines+markers')
-            
-            # Improve layout
-            fig.update_layout(
-                margin=dict(l=20, r=20, t=40, b=20),
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)'
+            # Create line chart
+            fig = px.line(
+                df,
+                x=date_cols[0],
+                y=numeric_cols,
+                title=self._extract_title_from_query(query) or "Time Series Analysis",
+                template="plotly_dark"
             )
             
+            # Enhance layout
+            fig.update_layout(
+                margin=dict(l=20, r=20, t=40, b=20),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(17,17,17,0.1)",
+                font=dict(color="white"),
+                showlegend=True,
+                xaxis=dict(
+                    rangeslider=dict(visible=True),
+                    gridcolor="rgba(255,255,255,0.1)"
+                ),
+                yaxis=dict(
+                    gridcolor="rgba(255,255,255,0.1)",
+                    tickformat=",.0f"
+                )
+            )
+            
+            # Update traces for better visualization
+            for i in range(len(fig.data)):
+                fig.data[i].update(
+                    mode='lines+markers',
+                    line=dict(width=2),
+                    marker=dict(size=6),
+                    hovertemplate=f"<b>{fig.data[i].name}</b><br>Date: %{{x}}<br>Value: %{{y:,.0f}}<extra></extra>"
+                )
+            
             return {
-                "type": "plotly",
-                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+                "type": "plotly_json",
+                "data": json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)),
+                "raw_data": df.to_dict('records')
             }
+            
         except Exception as e:
             logger.error(f"Error creating time series: {str(e)}")
-            return self._create_default_visualization(df, query)
+            return self._create_fallback_visualization(df.to_dict('records'), query, str(e))
     
     def _create_bar_chart(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
-        """Create a bar chart visualization"""
+        """Create a bar chart visualization."""
         try:
-            # Simple heuristic: if we have 2 columns, use the first as x and second as y
-            # If more columns, try to find a categorical and a numerical column
-            if len(df.columns) == 2:
-                x_col, y_col = df.columns[0], df.columns[1]
-            else:
-                # Find categorical columns (string or object type)
-                cat_cols = df.select_dtypes(include=['object', 'string', 'category']).columns.tolist()
-                # Find numeric columns
-                num_cols = df.select_dtypes(include=np.number).columns.tolist()
-                
-                if cat_cols and num_cols:
-                    x_col, y_col = cat_cols[0], num_cols[0]
-                elif len(num_cols) >= 2:
-                    x_col, y_col = num_cols[0], num_cols[1]
-                else:
-                    # Fallback
-                    x_col, y_col = df.columns[0], df.columns[1] if len(df.columns) > 1 else df.columns[0]
+            # Identify numeric and categorical columns
+            numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+            categorical_cols = df.select_dtypes(include=['object']).columns
             
-            # Limit to top 10 items for readability
-            if len(df) > 10:
-                # Sort by the y column and take top 10
-                df = df.sort_values(by=y_col, ascending=False).head(10)
+            if len(numeric_cols) == 0:
+                raise ValueError("No numeric columns found for bar chart values")
             
-            # Create the plot
-            fig = px.bar(df, x=x_col, y=y_col, title=f"{y_col} by {x_col}")
+            # Use first categorical column for x-axis, first numeric for y-axis
+            x_col = categorical_cols[0] if len(categorical_cols) > 0 else df.index
+            y_col = numeric_cols[0]
             
-            # Improve layout
+            # Create bar chart
+            fig = px.bar(
+                df,
+                x=x_col,
+                y=y_col,
+                title=self._extract_title_from_query(query) or "Data Distribution",
+                template="plotly_dark",
+                color_discrete_sequence=px.colors.qualitative.Set3
+            )
+            
+            # Enhance layout
             fig.update_layout(
                 margin=dict(l=20, r=20, t=40, b=20),
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)'
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(17,17,17,0.1)",
+                font=dict(color="white"),
+                showlegend=True,
+                xaxis=dict(
+                    title=x_col,
+                    tickangle=45,
+                    gridcolor="rgba(255,255,255,0.1)"
+                ),
+                yaxis=dict(
+                    title=y_col,
+                    gridcolor="rgba(255,255,255,0.1)",
+                    tickformat=",.0f"
+                ),
+                bargap=0.2
+            )
+            
+            # Update traces for better hover info
+            fig.update_traces(
+                hovertemplate="<b>%{x}</b><br>%{y:,.0f}<extra></extra>"
             )
             
             return {
-                "type": "plotly",
-                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+                "type": "plotly_json",
+                "data": json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)),
+                "raw_data": df.to_dict('records')
             }
+            
         except Exception as e:
             logger.error(f"Error creating bar chart: {str(e)}")
-            return self._create_default_visualization(df, query)
+            return self._create_fallback_visualization(df.to_dict('records'), query, str(e))
     
     def _create_pie_chart(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
-        """Create a pie chart visualization"""
+        """Create a pie chart visualization."""
         try:
-            # Simple heuristic: if we have 2 columns, use the first as labels and second as values
-            if len(df.columns) == 2:
-                labels_col, values_col = df.columns[0], df.columns[1]
-            else:
-                # Find categorical columns (string or object type)
-                cat_cols = df.select_dtypes(include=['object', 'string', 'category']).columns.tolist()
-                # Find numeric columns
-                num_cols = df.select_dtypes(include=np.number).columns.tolist()
-                
-                if cat_cols and num_cols:
-                    labels_col, values_col = cat_cols[0], num_cols[0]
-                else:
-                    # Fallback
-                    labels_col, values_col = df.columns[0], df.columns[1] if len(df.columns) > 1 else df.columns[0]
+            # Identify the numeric column for values
+            numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+            if len(numeric_cols) == 0:
+                raise ValueError("No numeric columns found for pie chart values")
             
-            # Limit to top 8 items for readability in pie charts
-            if len(df) > 8:
-                # Take the top 7 items plus "Others"
-                top_df = df.sort_values(by=values_col, ascending=False).head(7)
-                others_value = df.sort_values(by=values_col, ascending=False).iloc[7:][values_col].sum()
-                others_df = pd.DataFrame({labels_col: ['Others'], values_col: [others_value]})
-                df = pd.concat([top_df, others_df])
+            # Use the first numeric column for values and the first non-numeric column for names
+            value_col = numeric_cols[0]
+            name_col = next(col for col in df.columns if col not in numeric_cols)
             
-            # Create the plot
-            fig = px.pie(df, names=labels_col, values=values_col, title=f"Distribution of {values_col}")
+            # Sort values in descending order for better visualization
+            df = df.sort_values(by=value_col, ascending=False)
             
-            # Improve layout
+            # Create pie chart
+            fig = px.pie(
+                df,
+                values=value_col,
+                names=name_col,
+                title=self._extract_title_from_query(query) or f"Distribution of {name_col}",
+                template="plotly_dark",
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Set3
+            )
+            
+            # Enhance layout
             fig.update_layout(
                 margin=dict(l=20, r=20, t=40, b=20),
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)'
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(17,17,17,0.1)",
+                font=dict(color="white", size=12),
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1,
+                    font=dict(size=11)
+                ),
+                title=dict(
+                    font=dict(size=16)
+                )
+            )
+            
+            # Update traces for better hover info and text display
+            fig.update_traces(
+                textposition='inside',
+                textinfo='percent+label',
+                hovertemplate="<b>%{label}</b><br>Value: %{value:,.0f}<br>Percentage: %{percent:.1%}<extra></extra>",
+                textfont=dict(size=11, color="white")
             )
             
             return {
-                "type": "plotly",
-                "data": json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)
+                "type": "plotly_json",
+                "data": json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)),
+                "raw_data": df.to_dict('records')
             }
+            
         except Exception as e:
             logger.error(f"Error creating pie chart: {str(e)}")
-            return self._create_default_visualization(df, query)
+            return self._create_fallback_visualization(df.to_dict('records'), query, str(e))
     
     def _create_geo_chart(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
         """Create a geographical visualization based on the data"""
@@ -793,56 +950,58 @@ class VisualizationService:
     def _create_visualization_with_fallbacks(self, df: pd.DataFrame, query: str, primary_viz_type: str) -> Dict[str, Any]:
         """Create visualization with fallback options if primary type fails."""
         try:
-            # Define visualization methods and their fallback paths
-            viz_methods = {
-                'geo': self._create_geo_chart,
-                'bar': self._create_simple_bar_chart,
-                'line': self._create_simple_line_chart,
-                'pie': self._create_pie_chart,
-                'heatmap': self._create_heatmap,
-                'table': self._create_table
-            }
+            # Try primary visualization type first
+            if primary_viz_type == "time_series":
+                result = self._create_time_series(df, query)
+            elif primary_viz_type == "bar":
+                result = self._create_bar_chart(df, query)
+            elif primary_viz_type == "pie":
+                result = self._create_pie_chart(df, query)
+            elif primary_viz_type == "geo":
+                result = self._create_geo_chart(df, query)
+            elif primary_viz_type == "heatmap":
+                result = self._create_heatmap(df, query)
+            else:
+                result = self._create_default_visualization(df, query)
+
+            # Ensure proper formatting for frontend
+            if result and result.get("type") == "plotly_json":
+                fig_dict = result.get("data", {})
+                if isinstance(fig_dict, str):
+                    fig_dict = json.loads(fig_dict)
+                
+                # Update layout for consistent styling
+                if isinstance(fig_dict, dict) and "layout" in fig_dict:
+                    layout = fig_dict["layout"]
+                    layout.update({
+                        "template": "plotly_dark",
+                        "paper_bgcolor": "rgba(0,0,0,0)",
+                        "plot_bgcolor": "rgba(17,17,17,0.1)",
+                        "font": {"color": "white", "size": 12},
+                        "margin": {"l": 60, "r": 40, "t": 60, "b": 60},
+                        "showlegend": True,
+                        "legend": {
+                            "bgcolor": "rgba(0,0,0,0.3)",
+                            "bordercolor": "rgba(255,255,255,0.2)",
+                            "borderwidth": 1,
+                            "font": {"size": 11}
+                        }
+                    })
+                    fig_dict["layout"] = layout
+
+                # Ensure the data is properly JSON serialized
+                result["data"] = json.loads(json.dumps(fig_dict, cls=PlotlyJSONEncoder))
             
-            # Define fallback paths for each visualization type
-            fallback_paths = {
-                'geo': ['bar', 'table'],
-                'bar': ['line', 'table'],
-                'line': ['bar', 'table'],
-                'pie': ['bar', 'table'],
-                'heatmap': ['bar', 'table'],
-                'table': []  # No fallbacks for table
-            }
-            
-            # Try primary visualization type
-            logger.info(f"Attempting primary visualization type: {primary_viz_type}")
-            if primary_viz_type in viz_methods:
-                try:
-                    result = viz_methods[primary_viz_type](df, query)
-                    if result:
-                        logger.info(f"Successfully created {primary_viz_type} visualization")
-                        return result
-                except Exception as e:
-                    logger.warning(f"Failed to create {primary_viz_type} visualization: {str(e)}")
-            
-            # Try fallbacks if primary fails
-            if primary_viz_type in fallback_paths:
-                for fallback_type in fallback_paths[primary_viz_type]:
-                    logger.info(f"Attempting fallback visualization type: {fallback_type}")
-                    try:
-                        result = viz_methods[fallback_type](df, query)
-                        if result:
-                            logger.info(f"Successfully created fallback {fallback_type} visualization")
-                            return result
-                    except Exception as e:
-                        logger.warning(f"Failed to create {fallback_type} visualization: {str(e)}")
-            
-            # If all attempts fail, create a simple error visualization
-            logger.error("All visualization attempts failed, creating error visualization")
-            return self._create_fallback_visualization(df.to_dict('records'), query, "Failed to create visualization")
-            
+            return result
+
         except Exception as e:
-            logger.error(f"Error in visualization creation: {str(e)}")
-            return self._create_fallback_visualization(df.to_dict('records'), query, str(e))
+            logger.error(f"Error in primary visualization, trying fallback: {str(e)}")
+            try:
+                # Try simple bar chart as first fallback
+                return self._create_simple_bar_chart(df)
+            except:
+                # If all else fails, return as table
+                return self._create_table(df, query)
 
     def _create_single_value_visualization(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
         """Create a visualization for a single value result (1 row, 1 column)"""

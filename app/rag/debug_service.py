@@ -189,15 +189,20 @@ class DebugService:
             
             # Include only essential details
             if step.get('details'):
-                # Filter details to include only what's relevant for debugging
-                filtered_details = {}
-                for key, value in step['details'].items():
-                    # Include SQL queries, result counts, visualization info
-                    if key in ['sql_query', 'result_count', 'visualization_size', 
-                             'error', 'success', 'query', 'pattern', 'type']:
-                        filtered_details[key] = value
-                        
-                step_info['details'] = filtered_details
+                # Handle string details
+                if isinstance(step['details'], str):
+                    step_info['details'] = {'message': step['details']}
+                # Handle dictionary details
+                elif isinstance(step['details'], dict):
+                    # Filter details to include only what's relevant for debugging
+                    filtered_details = {}
+                    for key, value in step['details'].items():
+                        # Include SQL queries, result counts, visualization info
+                        if key in ['sql_query', 'result_count', 'visualization_size', 
+                                 'error', 'success', 'query', 'pattern', 'type']:
+                            filtered_details[key] = value
+                            
+                    step_info['details'] = filtered_details
                 
             debug_info['steps'].append(step_info)
             

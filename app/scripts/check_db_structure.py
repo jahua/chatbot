@@ -211,7 +211,7 @@ def main():
         tables = check_tables(connection)
         
         # Focus on master_card table
-        master_schema = "data_lake"  # assuming based on other table schemas
+        master_schema = "dw"  # using dw schema for all operations
         master_table = "master_card"  # based on the user query
         
         # Check if master_card table exists

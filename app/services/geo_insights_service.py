@@ -94,7 +94,7 @@ class GeoInsightsService:
                     LIMIT 10
                 """
             else:
-                logger.info("Materialized view not found, using direct query on data_lake.master_card")
+                logger.info("Materialized view not found, using direct query on dw.fact_spending")
                 # Improved direct query: use more flexible matching and optimize for better performance
                 sql = """
                     WITH region_data AS (
@@ -107,7 +107,7 @@ class GeoInsightsService:
                             central_latitude,
                             central_longitude,
                             bounding_box
-                        FROM data_lake.master_card
+                        FROM dw.fact_spending
                         WHERE LOWER(geo_name) = LOWER(:query)
                         AND central_latitude IS NOT NULL
                         AND central_longitude IS NOT NULL
@@ -151,7 +151,7 @@ class GeoInsightsService:
                             central_latitude,
                             central_longitude,
                             bounding_box
-                        FROM data_lake.master_card
+                        FROM dw.fact_spending
                         WHERE LOWER(geo_name) LIKE LOWER(:fuzzy_query)
                         AND central_latitude IS NOT NULL
                         AND central_longitude IS NOT NULL
@@ -194,7 +194,7 @@ class GeoInsightsService:
                         0 as swiss_tourists,
                         0 as foreign_tourists,
                         0 as total_spend
-                    FROM data_lake.master_card
+                    FROM dw.fact_spending
                     WHERE central_latitude IS NOT NULL
                     AND central_longitude IS NOT NULL
                     GROUP BY geo_type, geo_name, central_latitude, central_longitude
@@ -244,7 +244,7 @@ class GeoInsightsService:
                 txn_amt,
                 txn_date
             FROM 
-                data_lake.master_card
+                dw.fact_spending
             WHERE 
                 geo_type = :region_type
                 AND geo_name = :region_name
@@ -337,7 +337,7 @@ class GeoInsightsService:
                 central_latitude,
                 central_longitude
             FROM
-                data_lake.master_card
+                dw.fact_spending
             WHERE
                 geo_type = :region_type
                 AND geo_name = :region_name
@@ -460,7 +460,7 @@ class GeoInsightsService:
             SUM(txn_amt)::FLOAT AS total_spend,
             COUNT(*)::INTEGER AS point_count 
         FROM 
-            data_lake.master_card
+            dw.fact_spending
         WHERE 
             geo_type = :region_type
             AND geo_name = :region_name

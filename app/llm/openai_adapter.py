@@ -214,8 +214,8 @@ class OpenAIAdapter:
             # Add index hints based on schema context
             if "aoi_date" in optimized and "aoi_id" in optimized:
                 optimized = optimized.replace(
-                    "FROM data_lake.aoi_days_raw",
-                    "FROM data_lake.aoi_days_raw /*+ INDEX(ix_aoi_days_date_id) */"
+                    "FROM dw.fact_visitor",
+                    "FROM dw.fact_visitor /*+ INDEX(ix_fact_visitor_date_id) */"
                 )
             
             # Add LIMIT for large result sets

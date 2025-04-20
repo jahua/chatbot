@@ -6,6 +6,11 @@ class SchemaService:
     def __init__(self):
         self.schema_context = None
         
+    async def initialize(self):
+        """Initialize the schema service by pre-loading schema context"""
+        if not self.schema_context:
+            await self.get_schema_context()
+            
     async def get_schema_context(self) -> str:
         """Get database schema context"""
         if self.schema_context:
