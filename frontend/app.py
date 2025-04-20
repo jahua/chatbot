@@ -24,7 +24,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import the visualization service
-from app.services.streamlit_visualization_service import StreamlitVisualizationService
+from visualization_service import StreamlitVisualizationService
 
 # Set page config first thing
 st.set_page_config(
@@ -114,14 +114,11 @@ if "show_raw_events" not in st.session_state:
 
 # --- API URL config ---
 # Always ensure api_url is set in session state
-# Update reference back
-st.session_state.api_url = config.API_URL
+st.session_state.api_url = config.API_URL.rstrip('/')  # Remove trailing slash if present
 print(f"DEBUG app.py: Ensuring API URL is set to {st.session_state.api_url}")
-# ---------------------------------------
 
-# --- Define API health check function ---
 def get_base_url():
-    """Get the base URL without API prefix"""
+    """Get the base URL"""
     base_url = os.getenv("API_URL", "http://localhost:8000").rstrip('/')
     if not base_url.startswith(('http://', 'https://')):
         base_url = f"http://{base_url}"
@@ -130,7 +127,6 @@ def get_base_url():
 def check_api_connection():
     """Check if the API is accessible"""
     try:
-        # Health check uses base URL
         base_url = get_base_url()
         response = requests.get(f"{base_url}/health", timeout=5)
         if response.status_code == 200:
@@ -193,60 +189,24 @@ def process_query(query: str, use_streaming: bool = True):
             api_endpoint,
             json={
                 "message": query,
-                "session_id": st.session_state.current_chat_id,
-                "is_direct_query": False
+                "session_id": st.session_state.current_chat_id
             },
             headers={"Content-Type": "application/json"},
             timeout=60
         )
-
-        # Log response info
-        logger.info(
-            f"Received response from /chat: Status {response.status_code}")
-
-        # Handle the response
+        
+        # Process the response
         if response.status_code == 200:
-            try:
-                # Parse the response
-                result = response.json()
-                
-                # Create a message from the response
-                assistant_message = {
-                    "role": "assistant",
-                    "content": result.get(
-                        "content",
-                        "I don't have a response for that."),
-                    "request_id": request_id}
-
-                # Add additional data if available
-                if "sql_query" in result:
-                    assistant_message["sql_query"] = result["sql_query"]
-
-                if "visualization" in result:
-                    assistant_message["visualization"] = result["visualization"]
-
-                if "plotly_json" in result:
-                    assistant_message["plotly_json"] = result["plotly_json"]
-
-                if "debug_info" in result:
-                    assistant_message["debug_info"] = result["debug_info"]
-
-                # Add the message to the chat
-                st.session_state.messages.append(assistant_message)
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"Error parsing response JSON: {str(e)}")
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": "Sorry, I encountered an error processing the response.",
-                    "request_id": request_id
-                })
-        else:
-            logger.error(
-                f"Error: Server returned status code {response.status_code}")
+            response_data = response.json()
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": f"Sorry, there was an error processing your request. Status code: {response.status_code}",
+                "content": response_data.get("content", "No response content"),
+                "request_id": request_id
+            })
+        else:
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": f"Error: Server returned status code {response.status_code}",
                 "request_id": request_id
             })
     except requests.RequestException as e:
@@ -287,8 +247,7 @@ def process_streaming_query(query: str, request_id: str):
             f"{st.session_state.api_url}/chat/stream",
             json={
                 "message": query,
-                "session_id": st.session_state.current_chat_id,
-                "is_direct_query": False
+                "session_id": st.session_state.current_chat_id
             },
             headers={
                 "Content-Type": "application/json",
