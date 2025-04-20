@@ -12,10 +12,7 @@ def get_api_url():
     base_url = os.getenv("API_URL", "http://localhost:8000").rstrip('/')
     if not base_url.startswith(('http://', 'https://')):
         base_url = f"http://{base_url}"
-    
-    # Add API version prefix
-    api_prefix = os.getenv("API_V1_STR", "/api/v1").rstrip('/')
-    return f"{base_url}{api_prefix}"
+    return base_url
 
 API_URL = get_api_url()
 
