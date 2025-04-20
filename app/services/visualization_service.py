@@ -1243,3 +1243,18 @@ class VisualizationService:
                 f"Error creating single value visualization: {str(e)}")
             # Fall back to table visualization
             return self._create_table(df, query)
+
+    def get_spending_heatmap_query():
+        return """
+        SELECT
+            r.region_name,
+            SUM(s.total_amount) as total_spending,
+            COUNT(s.fact_id) as transaction_count,
+            AVG(s.avg_transaction) as avg_transaction_amount,
+            r.latitude,
+            r.longitude
+        FROM dw.fact_spending s
+        JOIN dw.dim_region r ON s.region_id = r.region_id
+        GROUP BY r.region_name, r.latitude, r.longitude
+        ORDER BY total_spending DESC;
+        """

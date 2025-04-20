@@ -70,33 +70,34 @@ class ChatService:
         try:
             # Initialize debug service first
             self.debug_service = DebugService()
-            
+
             # Initialize schema service with fallback
             self.schema_service = schema_service or SchemaService()
-            
+
             # Initialize other services
             self.dw_context_service = dw_context_service
             self.llm_adapter = llm_adapter or OpenAIAdapter()
             self.db_service = DatabaseService()
-            
+
             # Initialize modular services for LangChain-style flow
             self.sql_generation_service = SQLGenerationService(
                 llm_adapter=self.llm_adapter, debug_service=self.debug_service)
-            self.visualization_service = VisualizationService(self.debug_service)
+            self.visualization_service = VisualizationService(
+                self.debug_service)
             self.response_generation_service = ResponseGenerationService(
                 llm_adapter=self.llm_adapter, debug_service=self.debug_service)
-            
+
             # Initialize other supporting services
             self.tourism_region_service = TourismRegionService()
-            
+
             # Set up cache for query results
             self.query_cache = {}
             self.query_cache_ttl = 3600  # Cache results for 1 hour
-            
+
             # Initialize lock for async initialization
             self._initialization_lock = asyncio.Lock()
             self._initialized = False
-            
+
             logger.info("ChatService initialized successfully")
         except Exception as e:
             logger.error(f"Error during ChatService initialization: {str(e)}")
@@ -106,11 +107,11 @@ class ChatService:
         """Initialize the chat service asynchronously"""
         if self._initialized:
             return
-            
+
         async with self._initialization_lock:
             if self._initialized:
                 return
-                
+
             try:
                 # Initialize schema service
                 await self.schema_service.initialize()
@@ -133,12 +134,13 @@ class ChatService:
         try:
             # Ensure service is initialized
             await self.initialize()
-            
+
             # Initialize flow
             if message_id is None:
                 message_id = self.debug_service.start_flow(session_id)
             else:
-                self.debug_service.start_flow(session_id, message_id=message_id)
+                self.debug_service.start_flow(
+                    session_id, message_id=message_id)
 
             # Start streaming
             yield {"type": "start"}
@@ -173,9 +175,10 @@ class ChatService:
             self.debug_service.start_step(current_step_name)
             visualization = self._get_visualization(processed_results, message)
             self.debug_service.end_step(current_step_name, success=True)
-            
+
             if visualization:
-                if isinstance(visualization, dict) and visualization.get('type') == 'plotly':
+                if isinstance(visualization,
+                              dict) and visualization.get('type') == 'plotly':
                     yield {"type": "plotly_json", "data": visualization.get('data', {})}
                 else:
                     yield {"type": "visualization", "visualization": visualization}
@@ -205,7 +208,8 @@ class ChatService:
         except Exception as e:
             logger.error(f"Error in process_chat_stream: {str(e)}")
             logger.error(traceback.format_exc())
-            self.debug_service.end_step(current_step_name, success=False, error=str(e))
+            self.debug_service.end_step(
+                current_step_name, success=False, error=str(e))
             yield {"type": "error", "error": str(e)}
             yield {"type": "debug", "debug_info": json.dumps(self.debug_service.get_flow_info(), cls=DateTimeEncoder)}
             yield {"type": "end"}
@@ -216,7 +220,7 @@ class ChatService:
         """Detect if a message is conversational rather than a data query"""
         # Clean and normalize the message
         message = message.strip().lower()
-        
+
         # Define greetings that should trigger conversational response
         pure_greetings = [
             "hi",
@@ -232,11 +236,11 @@ class ChatService:
             "good morning",
             "good afternoon",
             "good evening"]
-        
+
         # Check if the message is EXACTLY a greeting
         if message in pure_greetings:
             return True
-            
+
         # Check if it looks like a question about data (not just a greeting)
         question_words = [
             "what",
@@ -299,11 +303,11 @@ class ChatService:
                 for term in data_related_terms:
                     if term in message:
                         return False  # It's a data query, not just conversation
-        
+
         # If very short and not obviously a data query, treat as conversation
         if len(message.split()) < 3:
             return True
-            
+
         # Check if it's asking about the bot itself rather than data
         bot_references = ["you", "your", "yourself",
                           "chatbot", "bot", "assistant", "ai"]
@@ -311,14 +315,14 @@ class ChatService:
             1 for ref in bot_references if ref in message.split())
         if bot_reference_count > 0 and len(message.split()) < 6:
             return True
-            
+
         return False
-    
+
     def is_schema_inquiry(self, message: str) -> bool:
         """Detect if the message is asking about available data or schema"""
         # Clean the message
         cleaned_message = message.lower().strip()
-        
+
         # Keywords related to schema inquiries
         schema_keywords = [
             "schema",
@@ -342,14 +346,14 @@ class ChatService:
             "what can i ask",
             "what can you tell me about",
             "show me what data"]
-        
+
         # Check if the message contains schema inquiry keywords
         for keyword in schema_keywords:
             if keyword in cleaned_message:
                 return True
-                
+
         return False
-    
+
     def get_schema_summary(self) -> str:
         """Generate a user-friendly summary of the database schema"""
         try:
@@ -375,7 +379,7 @@ class ChatService:
             logger.error(f"Error generating schema summary: {str(e)}")
             logger.error(traceback.format_exc())
             return "I can help you analyze tourism data including visitor statistics and transaction data. Please ask a specific question about tourism patterns."
-    
+
     def _split_into_chunks(self, text: str, chunk_size: int = 1000):
         """Yield successive chunk_size chunks from text."""
         if not text:
@@ -386,7 +390,7 @@ class ChatService:
 
         for i in range(0, len(text), chunk_size):
             yield text[i:i + chunk_size]
-    
+
     async def close(self):
         """Close the chat service and cleanup resources"""
         try:
@@ -396,10 +400,11 @@ class ChatService:
             logger.error(f"Error closing chat service: {str(e)}")
             raise
 
-    def _process_sql_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _process_sql_results(
+            self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process SQL results to ensure they are JSON serializable."""
         processed_results = []
-        
+
         for row in results:
             processed_row = {}
             for key, value in row.items():
@@ -410,23 +415,26 @@ class ChatService:
                 else:
                     processed_row[key] = value
             processed_results.append(processed_row)
-            
+
         return processed_results
 
-    def _get_visualization(self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
+    def _get_visualization(
+            self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
         """Generate visualization for query results."""
         try:
             if not results or not self.visualization_service:
                 return None
 
             # Create visualization using the service
-            visualization = self.visualization_service.create_visualization(results, query)
-            
+            visualization = self.visualization_service.create_visualization(
+                results, query)
+
             if visualization:
                 logger.info("Successfully generated visualization")
                 return visualization
-            
-            # If visualization fails, try to create a simplified version with limited rows
+
+            # If visualization fails, try to create a simplified version with
+            # limited rows
             try:
                 df = pd.DataFrame(results)
                 # Limit to 10 rows and strip complex nested data
@@ -440,9 +448,10 @@ class ChatService:
                     "data": json.loads(df.to_json(orient="records"))
                 }
             except Exception as e:
-                logger.error(f"Error creating fallback visualization: {str(e)}")
+                logger.error(
+                    f"Error creating fallback visualization: {str(e)}")
                 return None
-            
+
         except Exception as e:
             logger.error(f"Error in visualization generation: {str(e)}")
         return None
@@ -536,7 +545,7 @@ class ChatService:
                     success=False,
                     error=f"Error retrieving context: {str(step_e)}. Used fallback.")
                 return schema_context, dw_context  # Return fallback tuple
-        
+
         except Exception as e:
             logger.error(f"General error in _get_context: {str(e)}")
             logger.error(traceback.format_exc())
@@ -655,44 +664,66 @@ Tables:
             if not results or len(results) == 0:
                 logger.warning("No results to visualize in recovery attempt")
                 return None
-                
+
             # Create a basic visualization type based on result structure
             visualization = None
-            
+
             # Check if the data has numeric columns for charts
             numeric_cols = []
             for key, value in results[0].items():
-                if isinstance(value, (int, float)) or (isinstance(value, str) and value.replace('.', '', 1).isdigit()):
+                if isinstance(
+                    value, (int, float)) or (
+                    isinstance(
+                        value, str) and value.replace(
+                        '.', '', 1).isdigit()):
                     numeric_cols.append(key)
-                    
+
             # Check if there are date/time columns
             date_cols = []
             for key, value in results[0].items():
-                if key.lower() in ['date', 'day', 'month', 'year', 'time', 'datetime', 'period']:
+                if key.lower() in [
+                    'date',
+                    'day',
+                    'month',
+                    'year',
+                    'time',
+                    'datetime',
+                        'period']:
                     date_cols.append(key)
-                    
+
             # If we have both numeric and date columns, try a time series
             if numeric_cols and date_cols:
                 logger.info("Recovery: Creating time series visualization")
-                visualization = {"type": "time_series", "data": results, "x_field": date_cols[0], "y_field": numeric_cols[0]}
+                visualization = {
+                    "type": "time_series",
+                    "data": results,
+                    "x_field": date_cols[0],
+                    "y_field": numeric_cols[0]}
             # If we have multiple numeric columns, try a bar chart
             elif len(numeric_cols) > 1:
                 logger.info("Recovery: Creating bar chart visualization")
-                visualization = {"type": "bar", "data": results, "fields": numeric_cols[:2]}
+                visualization = {"type": "bar",
+                                 "data": results, "fields": numeric_cols[:2]}
             # If we have just one numeric column, try a pie chart
             elif numeric_cols:
                 logger.info("Recovery: Creating pie chart visualization")
-                non_numeric_cols = [k for k in results[0].keys() if k not in numeric_cols]
+                non_numeric_cols = [
+                    k for k in results[0].keys() if k not in numeric_cols]
                 if non_numeric_cols:
-                    visualization = {"type": "pie", "data": results, "label_field": non_numeric_cols[0], "value_field": numeric_cols[0]}
+                    visualization = {
+                        "type": "pie",
+                        "data": results,
+                        "label_field": non_numeric_cols[0],
+                        "value_field": numeric_cols[0]}
             # Otherwise, just use a table
             else:
                 logger.info("Recovery: Creating table visualization")
                 visualization = {"type": "table", "data": results}
-                
+
             # Check if the visualization is a Plotly chart
             if visualization and visualization.get('type') == 'plotly':
-                logger.info("Converting recovery plotly visualization format for frontend")
+                logger.info(
+                    "Converting recovery plotly visualization format for frontend")
                 return {
                     "type": "plotly_json",
                     "data": visualization.get('data', {})
@@ -775,7 +806,7 @@ Tables:
     # For spending patterns query
     def get_spending_patterns_query(self):
         return """
-        SELECT 
+        SELECT
             d.full_date,
             r.region_name,
             SUM(s.total_amount) as total_spending
@@ -791,7 +822,7 @@ Tables:
     def get_visitor_density_query(self):
         return """
         WITH region_stats AS (
-            SELECT 
+            SELECT
                 r.canton_code,
                 r.region_name,
                 r.population,
@@ -801,7 +832,7 @@ Tables:
             WHERE r.population > 0
             GROUP BY r.canton_code, r.region_name, r.population
         )
-        SELECT 
+        SELECT
             canton_code,
             region_name,
             total_visitors,

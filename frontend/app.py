@@ -984,22 +984,26 @@ def main():
     st.markdown("### Example Questions")
     example_questions = [
         "Show me the daily visitor trend in July 2023 with a line chart",
-        "Compare Swiss vs foreign tourists by month in 2023 using a bar chart",
         "Create a pie chart of spending distribution across different industries",
-        "Plot the top 5 countries by visitor count in summer 2023 as a bar chart",
+        "Display weekly visitor trends for the first quarter of 2023",
+        "Compare visitor numbers between different regions of Switzerland",
         "Show weekly visitor trends for spring 2023 as a line graph",
-        "Create a heatmap of spending patterns across different regions",
-        "Plot visitor distribution by origin for each month in 2023",
-        "Visualize daily visitor patterns during July-August 2023 with a line chart"]
+        "Which are the top 10 regions by visitor count?"]
 
-    # Display examples in a grid of buttons at the bottom
-    cols = st.columns(4)
-    for i, q in enumerate(example_questions):
-        with cols[i % 4]:
-            if st.button(q, key=f"example_{i}", use_container_width=True):
-                st.session_state.processing = True  # Set processing flag
-                # Force streaming for better visualization handling
-                process_query(q, use_streaming=True)
+    # Create two columns for example questions
+    col1, col2 = st.columns(2)
+
+    # Display examples in two columns with better styling
+    for i, question in enumerate(example_questions):
+        with col1 if i % 2 == 0 else col2:
+            if st.button(
+                question,
+                key=f"example_{i}",
+                use_container_width=True,
+                help="Click to use this example"
+            ):
+                # Process the question immediately
+                process_query(question, use_streaming=True)
 
 
 # Entry point - call the main function
