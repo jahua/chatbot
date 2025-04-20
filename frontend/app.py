@@ -29,7 +29,7 @@ from visualization_service import StreamlitVisualizationService
 # Set page config first thing
 st.set_page_config(
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
     page_title="Swisscom Data Explorer")
 
 # Add custom CSS to make content area wider and more responsive
@@ -48,11 +48,22 @@ st.markdown("""
     /* Improve chat message display */
     [data-testid="stChatMessage"] {
         max-width: 90% !important;
+        margin-bottom: 1rem !important;
+    }
+
+    /* Add spacing between messages */
+    .stChatMessage {
+        margin-bottom: 1.5rem !important;
     }
 
     /* Make dataframes use full width */
     .stDataFrame {
         width: 100% !important;
+    }
+
+    /* Hide View SQL Query in input form */
+    [data-testid="stExpander"] {
+        display: none !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -279,14 +290,21 @@ def process_streaming_query(query: str, request_id: str):
                         content = data.get("content", "")
                         current_message["content"] += content
                         with message_containers["content"]:
-                            st.markdown(current_message["content"])
+                            # Split the content into processing steps and actual response
+                            if "Processing your request..." in content:
+                                st.markdown("Processing your request...")
+                            elif "Analyzing your question..." in content:
+                                st.markdown("Analyzing your question...")
+                            else:
+                                st.markdown(content)
                     
                     elif event_type == "sql_query":
                         sql_query = data.get("sql_query", "")
                         current_message["sql_query"] = sql_query
                         with message_containers["sql"]:
-                            with st.expander("View SQL Query"):
-                                st.code(sql_query, language="sql")
+                            if st.session_state.debug_mode:  # Only show SQL query in debug mode
+                                with st.expander("View SQL Query"):
+                                    st.code(sql_query, language="sql")
                     
                     elif event_type == "sql_results":
                         sql_results = data.get("sql_results", {})
@@ -508,40 +526,68 @@ with st.sidebar:
 
 def main():
     """Main function to run the Streamlit application"""
-    # Use columns for the header to add a logo on the right
-    header_cols = st.columns([4, 1])
-    with header_cols[0]:
-        st.title("Tourism Data Insights Chatbot 💬")
-        st.markdown("""
-        Ask questions about Swiss tourism data to get insights and visualizations.
-        """)
+    # Title and description
+    st.title("Tourism Data Insights Chatbot 💬")
+    st.markdown("""
+    Ask questions about Swiss tourism data to get insights and visualizations.
+    """)
 
-    # Add API connection status in the second column
-    with header_cols[1]:
-        st.markdown("### Status")
+    # Create a container for status
+    status_container = st.container()
+    with status_container:
+        st.markdown('<div style="margin-bottom: 1rem;">', unsafe_allow_html=True)
         if check_api_connection():
             st.success("API Connected ✅")
         else:
             st.error("API Unavailable ❌")
             st.info("Please check if the backend server is running at: " + st.session_state.api_url)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # Add tab-based navigation
-    tabs = st.tabs(["Chat", "Examples", "Debug", "About"])
+    # Add a separator after status
+    st.markdown('<hr style="margin: 0.5rem 0; border-color: #333;">', unsafe_allow_html=True)
 
-    # Chat tab
-    with tabs[0]:
-        st.title("Tourism Data Insights Chatbot")
-        
-        # Add a debug toggle in the main chat interface
-        col1, col2 = st.columns([4, 1])
-        with col2:
-            show_debug = st.checkbox("Debug Mode", value=st.session_state.debug_mode, key="main_debug_mode")
-            st.session_state.debug_mode = show_debug
-            st.session_state.show_raw_events = st.checkbox("Show Raw Data", value=st.session_state.show_raw_events, key="main_raw_data")
-        
-        # Display the chat interface
+    # Create a container for the main chat interface
+    chat_container = st.container()
+    
+    # Create a container for the input form
+    input_container = st.container()
+
+    # Display chat history in the main container
+    with chat_container:
         for message in st.session_state.messages:
-            display_message(message)
+            with st.chat_message(message["role"]):
+                # Display the main content
+                st.markdown(message.get("content", ""))
+                
+                # Initialize visualization service if needed
+                viz_service = StreamlitVisualizationService()
+                
+                # For assistant messages, show additional info in a more organized way
+                if message["role"] == "assistant":
+                    # Create columns for SQL and Debug toggles
+                    if "sql_query" in message or st.session_state.debug_mode:
+                        col1, col2 = st.columns([1, 1])
+                        
+                        # SQL Query toggle
+                        if "sql_query" in message:
+                            with col1:
+                                if st.toggle("Show SQL Query", key=f"sql_{message.get('request_id', '')}"):
+                                    st.code(message["sql_query"], language="sql")
+                        
+                        # Debug info toggle
+                        if st.session_state.debug_mode and "debug_info" in message:
+                            with col2:
+                                if st.toggle("Show Debug Info", key=f"debug_{message.get('request_id', '')}"):
+                                    st.json(message["debug_info"])
+                
+                # Display visualization if present
+                if "visualization" in message:
+                    viz_data = message["visualization"]
+                    if isinstance(viz_data, dict) and "data" in viz_data:
+                        viz_service.create_visualization(
+                            viz_data["data"],
+                            message.get("content", "")
+                        )
 
         # Show loading animation when processing
         if st.session_state.processing:
@@ -550,7 +596,8 @@ def main():
                     '<div style="display: flex; align-items: center; gap: 8px;">🤖 <div class="stSpinner"></div> Analyzing data...</div>',
                     unsafe_allow_html=True)
 
-        # Chat input using form with improved layout
+    # Chat input form at the bottom
+    with input_container:
         with st.form(key="main_chat_form", clear_on_submit=True):
             cols = st.columns([7, 1, 1, 1])
             with cols[0]:
@@ -574,183 +621,25 @@ def main():
                 st.session_state.messages = []
                 st.session_state.processed_queries = set()
 
-    # Examples tab
-    with tabs[1]:
-        st.markdown("### Example Questions")
-        example_questions = [
-            # New questions from the user
-            "What was the busiest week in spring 2023?",
-            "What day had the most visitors in 2023?", 
-            "Compare Swiss vs foreign tourists in April 2023",
-            "Which industry had the highest spending?",
-            "Show visitor counts for top 3 days in summer 2023?",
-            "Plot the trend of visitors from Germany in 2023",
-            "What percentage of visitors came from Asia in 2023?",
-            "Show me the spending patterns in hotels across different regions"
-        ]
+    # Add example questions at the bottom
+    st.markdown("### Example Questions")
+    example_questions = [
+        "What was the busiest week in spring 2023?",
+        "What day had the most visitors in 2023?", 
+        "Compare Swiss vs foreign tourists in April 2023",
+        "Which industry had the highest spending?",
+        "Show visitor counts for top 3 days in summer 2023?",
+        "Plot the trend of visitors from Germany in 2023",
+        "What percentage of visitors came from Asia in 2023?",
+        "Show me the spending patterns in hotels across different regions"
+    ]
 
-        # Display examples in a grid of buttons
-        cols = st.columns(2)
-        for i, q in enumerate(example_questions):
-            with cols[i % 2]:
-                if st.button(q, key=f"example_{i}"):
-                    process_query(q)
-
-    # Debug tab
-    with tabs[2]:
-        st.markdown("### Debugging Tools")
-        
-        # Add raw event data toggle
-        st.checkbox("Show raw event data", value=False, key="show_raw_events", 
-                   help="When enabled, shows the complete JSON data for each event during streaming")
-        
-        # Connection test tool
-        st.subheader("Connection Test")
-        test_cols = st.columns([3, 1])
-        with test_cols[0]:
-            test_query = st.text_input(
-                "Test query:",
-                value="Which industry had the highest spending?",
-                key="debug_test_query")
-        with test_cols[1]:
-            if st.button("Run Test", key="debug_test_button"):
-                debug_placeholder = st.empty()
-                debug_placeholder.info("Testing streaming connection...")
-
-                # Create test message in session
-                test_message = {
-                    "role": "user",
-                    "content": test_query
-                }
-                st.session_state.messages.append(test_message)
-
-                # Logging state
-                log_container = st.container()
-                with log_container:
-                    st.write("### Connection Logs")
-                    log_output = st.empty()
-                    log_text = ""
-
-                    def add_log(msg):
-                        nonlocal log_text
-                        timestamp = datetime.now().strftime("%H:%M:%S")
-                        log_text += f"[{timestamp}] {msg}\n"
-                        log_output.code(log_text)
-
-                    # Run test
-                    add_log(f"Starting test with query: {test_query}")
-
-                    try:
-                        # Test connection
-                        add_log(f"Connecting to {st.session_state.api_url}/chat/stream")
-
-                        request_id = str(uuid.uuid4())
-                        response = requests.post(
-                            f"{st.session_state.api_url}/chat/stream",
-                            json={
-                                "message": test_query,
-                                "session_id": str(
-                                    uuid.uuid4()),
-                                "is_direct_query": False},
-                            headers={
-                                "Content-Type": "application/json",
-                                "Accept": "text/event-stream"},
-                            stream=True,
-                            timeout=60)
-
-                        add_log(
-                            f"Connection established: Status {response.status_code}")
-                        debug_placeholder.success(
-                            f"Connected! Status: {response.status_code}")
-
-                        # Process streaming response
-                        event_count = 0
-                        content_received = False
-
-                        for line in response.iter_lines():
-                            if not line:
-                                continue
-
-                            decoded_line = line.decode('utf-8')
-                            if not decoded_line.startswith('data:'):
-                                continue
-
-                            try:
-                                json_data = decoded_line[len('data:'):].strip()
-                                if not json_data:
-                                    continue
-
-                                data = json.loads(json_data)
-                                event_type = data.get("type", "")
-                                event_count += 1
-
-                                add_log(f"Event {event_count}: {event_type}")
-
-                                if event_type == "content":
-                                    content = data.get("content", "")
-                                    content_received = True
-                                    add_log(f"Content: {content[:50]}...")
-
-                                if event_type == "end":
-                                    add_log("Stream completed successfully")
-                                    debug_placeholder.success(
-                                        "Test completed successfully!")
-                                    break
-
-                            except Exception as e:
-                                add_log(f"Error processing event: {str(e)}")
-
-                        # Log final stats
-                        add_log(
-                            f"Test finished. Processed {event_count} events.")
-                        if not content_received:
-                            add_log(
-                                "WARNING: No content was received in the stream")
-
-                    except Exception as e:
-                        add_log(f"Error: {str(e)}")
-                        debug_placeholder.error(f"Test failed: {str(e)}")
-
-        # API information
-        st.subheader("API Information")
-        st.write(f"API URL: {st.session_state.api_url}")
-        st.write(f"Session ID: {st.session_state.current_chat_id}")
-
-        # Debug settings
-        st.subheader("Debug Settings")
-        if st.checkbox("Show all debugging information", value=False):
-            st.json({
-                "API URL": st.session_state.api_url,
-                "Session ID": st.session_state.current_chat_id,
-                "Message count": len(st.session_state.messages),
-                "Processing state": st.session_state.processing,
-                "DB Config": st.session_state.db_config
-            })
-
-    # About tab
-    with tabs[3]:
-        st.markdown("""
-        ### About This Chatbot
-
-        This application provides insights into Swiss tourism data using natural language queries.
-
-        **Features:**
-        - Ask questions in plain English about tourism data
-        - Get visualizations of trends and patterns
-        - View SQL queries used to analyze the data
-        - See detailed explanations of the results
-
-        **Data Sources:**
-        The chatbot analyzes tourism data from various Swiss sources, including visitor numbers,
-        demographics, spending patterns, and regional statistics.
-
-        **Technologies:**
-        - Frontend: Streamlit
-        - Backend: FastAPI
-        - LLM: Claude Sonnet 3.5
-        - Database: PostgreSQL
-        """)
-
+    # Display examples in a grid of buttons at the bottom
+    cols = st.columns(4)
+    for i, q in enumerate(example_questions):
+        with cols[i % 4]:
+            if st.button(q, key=f"example_{i}", use_container_width=True):
+                process_query(q)
 
 # Entry point - call the main function
 if __name__ == "__main__":
