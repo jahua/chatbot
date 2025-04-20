@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 import sseclient  # For server-sent events
 import sys  # <-- Add import for flush
 import config  # Import configuration
+import plotly.express as px
 
 # Add the project root to the Python path
 import sys
@@ -238,13 +239,11 @@ def process_query(query: str, use_streaming: bool = True):
 def process_streaming_query(query: str, request_id: str):
     """Process a query with streaming and update chat interface incrementally."""
     try:
-        # Initialize message containers
-        message_containers = {
-            "content": st.empty(),
-            "sql": st.empty(),
-            "viz": st.empty(),
-            "debug": st.empty() if st.session_state.debug_mode else None
-        }
+        # Initialize message containers using st.container() for persistence
+        content_container = st.empty()
+        sql_container = st.empty()
+        viz_container = st.empty()  # Single container for visualization
+        debug_container = st.empty() if st.session_state.debug_mode else None
         
         # Initialize message data
         current_message = {
@@ -281,68 +280,131 @@ def process_streaming_query(query: str, request_id: str):
                     data = json.loads(event.data)
                     event_type = data.get("type", "")
                     
-                    # Show raw events if debug mode is enabled
-                    if st.session_state.show_raw_events and message_containers["debug"]:
-                        with message_containers["debug"]:
-                            st.json(data)
-                    
                     if event_type == "content":
                         content = data.get("content", "")
                         current_message["content"] += content
-                        with message_containers["content"]:
-                            # Split the content into processing steps and actual response
-                            if "Processing your request..." in content:
-                                st.markdown("Processing your request...")
-                            elif "Analyzing your question..." in content:
-                                st.markdown("Analyzing your question...")
-                            else:
-                                st.markdown(content)
+                        with content_container:
+                            st.markdown(current_message["content"])
                     
                     elif event_type == "sql_query":
                         sql_query = data.get("sql_query", "")
                         current_message["sql_query"] = sql_query
-                        with message_containers["sql"]:
-                            if st.session_state.debug_mode:  # Only show SQL query in debug mode
+                        with sql_container:
+                            if st.session_state.debug_mode:
                                 with st.expander("View SQL Query"):
                                     st.code(sql_query, language="sql")
                     
-                    elif event_type == "sql_results":
-                        sql_results = data.get("sql_results", {})
-                        current_message["sql_results"] = sql_results
-                    
-                    elif event_type == "visualization":
-                        viz_data = data.get("visualization", {})
-                        current_message["visualization"] = viz_data
-                        with message_containers["viz"]:
-                            if isinstance(viz_data, dict) and "data" in viz_data:
-                                viz_service = StreamlitVisualizationService()
-                                viz_service.create_visualization(
-                                    viz_data["data"],
-                                    current_message.get("content", "")
-                                )
-                    
-                    elif event_type == "plotly_json":
-                        plotly_data = data.get("data", {})
-                        current_message["plotly_json"] = plotly_data
-                        with message_containers["viz"]:
-                            if plotly_data:
-                                fig = go.Figure(plotly_data)
-                                st.plotly_chart(fig, use_container_width=True)
-                    
-                    elif event_type == "debug_info":
-                        debug_info = data.get("debug_info", {})
-                        current_message["debug_info"] = debug_info
-                        if st.session_state.debug_mode and message_containers["debug"]:
-                            with message_containers["debug"]:
-                                with st.expander("Debug Info"):
-                                    st.json(debug_info)
-                    
-                    elif event_type == "error":
-                        error_msg = data.get("error", "An unknown error occurred")
-                        current_message["content"] = f"Error: {error_msg}"
-                        current_message["error"] = error_msg
-                        with message_containers["content"]:
-                            st.error(error_msg)
+                    elif event_type in ["visualization", "sql_results"]:
+                        viz_data = data.get("visualization", {}) if event_type == "visualization" else data.get("sql_results", {})
+                        if viz_data:
+                            current_message["visualization"] = viz_data
+                            with viz_container:
+                                if isinstance(viz_data, dict):
+                                    data_to_viz = viz_data.get("data", viz_data)
+                                else:
+                                    data_to_viz = viz_data
+                                    
+                                # Convert data to DataFrame
+                                if isinstance(data_to_viz, list) and len(data_to_viz) > 0:
+                                    df = pd.DataFrame(data_to_viz)
+                                    
+                                    # Check for time/date columns
+                                    date_cols = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+                                    numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+                                    
+                                    if date_cols and numeric_cols.any():
+                                        # Create enhanced line chart for time series data
+                                        date_col = date_cols[0]
+                                        fig = px.line(df, x=date_col, y=numeric_cols, 
+                                                    title="Visitor Trends",
+                                                    template="plotly_dark",
+                                                    height=500)
+                                        
+                                        # Enhanced layout settings
+                                        fig.update_layout(
+                                            xaxis_title="Date",
+                                            yaxis_title="Number of Visitors",
+                                            showlegend=True,
+                                            margin=dict(l=60, r=40, t=60, b=60),
+                                            plot_bgcolor='rgba(17, 17, 17, 0.1)',
+                                            paper_bgcolor='rgba(0,0,0,0)',
+                                            font=dict(
+                                                size=13,
+                                                color='white'
+                                            ),
+                                            title=dict(
+                                                font=dict(size=16),
+                                                x=0.5,
+                                                xanchor='center'
+                                            ),
+                                            legend=dict(
+                                                yanchor="top",
+                                                y=0.99,
+                                                xanchor="left",
+                                                x=0.01,
+                                                bgcolor='rgba(0,0,0,0.3)',
+                                                bordercolor='rgba(255,255,255,0.2)',
+                                                borderwidth=1
+                                            ),
+                                            xaxis=dict(
+                                                gridcolor='rgba(255,255,255,0.1)',
+                                                showgrid=True,
+                                                tickfont=dict(size=12)
+                                            ),
+                                            yaxis=dict(
+                                                gridcolor='rgba(255,255,255,0.1)',
+                                                showgrid=True,
+                                                tickfont=dict(size=12),
+                                                tickformat=',.0f'  # Format large numbers without decimals
+                                            )
+                                        )
+                                        
+                                        # Enhanced trace settings
+                                        fig.update_traces(
+                                            line=dict(width=3),  # Thicker lines
+                                            mode='lines+markers',  # Add markers
+                                            marker=dict(
+                                                size=8,
+                                                line=dict(width=2, color='rgba(255,255,255,0.8)')
+                                            ),
+                                            hovertemplate="<b>Date:</b> %{x}<br>" +
+                                                         "<b>Visitors:</b> %{y:,.0f}<br>" +
+                                                         "<extra></extra>"  # Clean hover label
+                                        )
+                                        
+                                        # Display the plot
+                                        st.plotly_chart(fig, use_container_width=True, config={
+                                            'displayModeBar': True,
+                                            'displaylogo': False,
+                                            'modeBarButtonsToRemove': ['lasso2d', 'select2d']
+                                        })
+                                        
+                                        # Show summary statistics
+                                        with st.expander("View Summary Statistics"):
+                                            col1, col2, col3 = st.columns(3)
+                                            numeric_data = df[numeric_cols[0]]  # Assuming first numeric column
+                                            with col1:
+                                                st.metric("Average", f"{numeric_data.mean():,.0f}")
+                                            with col2:
+                                                st.metric("Maximum", f"{numeric_data.max():,.0f}")
+                                            with col3:
+                                                st.metric("Minimum", f"{numeric_data.min():,.0f}")
+                                            
+                                            # Show raw data in a clean table
+                                            st.dataframe(
+                                                df.style.format({
+                                                    numeric_cols[0]: '{:,.0f}'.format
+                                                }),
+                                                use_container_width=True
+                                            )
+                                    else:
+                                        # For non-time series data, show as a styled table
+                                        st.dataframe(
+                                            df.style.format({
+                                                col: '{:,.0f}'.format for col in numeric_cols
+                                            }),
+                                            use_container_width=True
+                                        )
                     
                     elif event_type == "end":
                         # Add the final message to session state
@@ -359,16 +421,252 @@ def process_streaming_query(query: str, request_id: str):
             # Clean up streaming client
             client.close()
             
-    except TimeoutError:
-        st.error("The request timed out. Please try again or rephrase your question.")
-    except requests.exceptions.RequestException as e:
-        st.error(f"Failed to connect to the API: {str(e)}")
     except Exception as e:
         st.error(f"An unexpected error occurred: {str(e)}")
+        logger.error(f"Error in process_streaming_query: {str(e)}\n{traceback.format_exc()}")
     finally:
-        # Reset processing state
         st.session_state.processing = False
 
+def create_visualization(data, viz_type="auto"):
+    """Create appropriate visualization based on data structure and type"""
+    try:
+        # Convert data to DataFrame if needed
+        if isinstance(data, list) and len(data) > 0:
+            df = pd.DataFrame(data)
+        elif isinstance(data, dict):
+            df = pd.DataFrame([data])
+        else:
+            st.error("Invalid data format for visualization")
+            return
+
+        # Get column types
+        numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+        date_cols = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+        text_cols = df.select_dtypes(include=['object']).columns
+
+        # Create tabs for different visualization options
+        tab1, tab2, tab3 = st.tabs(["📈 Main Chart", "📊 Alternative View", "📑 Data Table"])
+        
+        with tab1:
+            # Determine primary visualization type
+            if viz_type == "auto":
+                if 'spending' in df.columns.str.lower().tolist() or 'amount' in df.columns.str.lower().tolist():
+                    viz_type = "bar"
+                elif 'density' in df.columns.str.lower().tolist():
+                    viz_type = "heatmap"
+                elif date_cols and numeric_cols.any():
+                    viz_type = "line"
+                elif len(df.columns) == 2 and len(numeric_cols) == 1:
+                    viz_type = "pie"
+                else:
+                    viz_type = "bar"
+
+            if viz_type == "line":
+                date_col = date_cols[0]
+                fig = px.line(
+                    df, 
+                    x=date_col,
+                    y=numeric_cols,
+                    title="Time Series Analysis",
+                    template="plotly_dark",
+                    height=500
+                )
+                
+                # Enhanced line chart layout
+                fig.update_layout(
+                    showlegend=True,
+                    margin=dict(l=60, r=40, t=60, b=60),
+                    plot_bgcolor='rgba(17, 17, 17, 0.1)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(size=13, color='white'),
+                    title=dict(
+                        font=dict(size=18, color='white'),
+                        x=0.5,
+                        xanchor='center'
+                    ),
+                    legend=dict(
+                        yanchor="top",
+                        y=0.99,
+                        xanchor="left",
+                        x=0.01,
+                        bgcolor='rgba(0,0,0,0.3)',
+                        bordercolor='rgba(255,255,255,0.2)',
+                        borderwidth=1,
+                        font=dict(size=12)
+                    ),
+                    xaxis=dict(
+                        gridcolor='rgba(255,255,255,0.1)',
+                        showgrid=True,
+                        title_font=dict(size=14),
+                        tickfont=dict(size=12),
+                        rangeslider=dict(visible=True)  # Add range slider
+                    ),
+                    yaxis=dict(
+                        gridcolor='rgba(255,255,255,0.1)',
+                        showgrid=True,
+                        title_font=dict(size=14),
+                        tickfont=dict(size=12),
+                        tickformat=',.0f'
+                    ),
+                    updatemenus=[
+                        dict(
+                            type="buttons",
+                            showactive=False,
+                            buttons=[
+                                dict(
+                                    label="Play",
+                                    method="animate",
+                                    args=[None, {"frame": {"duration": 500, "redraw": True}, "fromcurrent": True}]
+                                ),
+                                dict(
+                                    label="Pause",
+                                    method="animate",
+                                    args=[[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}]
+                                )
+                            ],
+                            x=0.1,
+                            y=1.1,
+                        )
+                    ]
+                )
+                
+                fig.update_traces(
+                    line=dict(width=3),
+                    mode='lines+markers',
+                    marker=dict(
+                        size=8,
+                        line=dict(width=2, color='rgba(255,255,255,0.8)')
+                    ),
+                    hovertemplate="<b>Date:</b> %{x}<br>" +
+                                "<b>Value:</b> %{y:,.0f}<br>" +
+                                "<extra></extra>"
+                )
+
+            elif viz_type == "bar":
+                if len(df.columns) >= 2:
+                    x_col = text_cols[0] if len(text_cols) > 0 else df.columns[0]
+                    y_cols = numeric_cols
+                else:
+                    x_col = df.index
+                    y_cols = df.columns[0]
+
+                fig = px.bar(
+                    df,
+                    x=x_col,
+                    y=y_cols,
+                    title="Data Distribution",
+                    template="plotly_dark",
+                    height=500,
+                    barmode='group',
+                    color_discrete_sequence=px.colors.qualitative.Set3
+                )
+                
+                fig.update_layout(
+                    showlegend=True,
+                    margin=dict(l=60, r=40, t=60, b=60),
+                    plot_bgcolor='rgba(17, 17, 17, 0.1)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(size=13, color='white'),
+                    title=dict(
+                        font=dict(size=18),
+                        x=0.5,
+                        xanchor='center'
+                    ),
+                    xaxis=dict(
+                        categoryorder='total descending',  # Sort bars by value
+                        gridcolor='rgba(255,255,255,0.1)',
+                        showgrid=True,
+                        tickangle=45  # Angle labels for better readability
+                    ),
+                    yaxis=dict(
+                        gridcolor='rgba(255,255,255,0.1)',
+                        showgrid=True,
+                        tickformat=',.0f'
+                    ),
+                    bargap=0.15,
+                    bargroupgap=0.1
+                )
+
+            # Display the plot
+            st.plotly_chart(fig, use_container_width=True, config={
+                'displayModeBar': True,
+                'displaylogo': False,
+                'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+                'scrollZoom': True
+            })
+
+        with tab2:
+            # Create alternative visualization
+            if viz_type == "line":
+                # Show as area chart
+                fig2 = px.area(
+                    df,
+                    x=date_col,
+                    y=numeric_cols,
+                    title="Area View",
+                    template="plotly_dark",
+                    height=400
+                )
+            elif viz_type == "bar":
+                # Show as pie if single numeric column
+                if len(numeric_cols) == 1:
+                    fig2 = px.pie(
+                        df,
+                        values=numeric_cols[0],
+                        names=x_col,
+                        title="Distribution View",
+                        template="plotly_dark",
+                        height=400,
+                        hole=0.4
+                    )
+                else:
+                    # Show as stacked bar
+                    fig2 = px.bar(
+                        df,
+                        x=x_col,
+                        y=numeric_cols,
+                        title="Stacked View",
+                        template="plotly_dark",
+                        height=400,
+                        barmode='stack'
+                    )
+
+            fig2.update_layout(
+                margin=dict(l=40, r=40, t=40, b=40),
+                plot_bgcolor='rgba(17, 17, 17, 0.1)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(size=12, color='white')
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+        with tab3:
+            # Show summary statistics
+            st.subheader("Summary Statistics")
+            if numeric_cols.any():
+                cols = st.columns(3)
+                for i, col in enumerate(numeric_cols[:3]):  # Show stats for up to 3 numeric columns
+                    with cols[i]:
+                        st.metric(
+                            f"{col}",
+                            f"{df[col].mean():,.1f}",
+                            f"±{df[col].std():,.1f}"
+                        )
+
+            # Show interactive table with formatting
+            st.dataframe(
+                df.style.format({
+                    col: '{:,.2f}' for col in numeric_cols
+                }).background_gradient(
+                    cmap='Blues',
+                    subset=numeric_cols
+                ),
+                use_container_width=True,
+                height=300
+            )
+
+    except Exception as e:
+        st.error(f"Error creating visualization: {str(e)}")
+        st.write("Debug: Full error:", traceback.format_exc())
 
 def display_rag_flow(steps: List[Dict[str, Any]],
                      visualization: Optional[str] = None):
@@ -417,30 +715,10 @@ def display_message(message: Dict[str, Any]) -> None:
         # Display the main content
         st.markdown(message.get("content", ""))
         
-        # Initialize visualization service if needed
-        viz_service = StreamlitVisualizationService()
-        
         # Display SQL query if present
         if "sql_query" in message:
             with st.expander("View SQL Query"):
                 st.code(message["sql_query"], language="sql")
-        
-        # Display SQL results if present
-        if "sql_results" in message:
-            with st.expander("View Data"):
-                viz_service.create_visualization(
-                    message["sql_results"],
-                    message.get("content", "")  # Use message content as context
-                )
-        
-        # Display visualization if present
-        if "visualization" in message:
-            viz_data = message["visualization"]
-            if isinstance(viz_data, dict) and "data" in viz_data:
-                viz_service.create_visualization(
-                    viz_data["data"],
-                    message.get("content", "")
-                )
         
         # Display debug info if present and debug mode is enabled
         if st.session_state.get("debug_mode", False) and "debug_info" in message:
@@ -559,9 +837,6 @@ def main():
                 # Display the main content
                 st.markdown(message.get("content", ""))
                 
-                # Initialize visualization service if needed
-                viz_service = StreamlitVisualizationService()
-                
                 # For assistant messages, show additional info in a more organized way
                 if message["role"] == "assistant":
                     # Create columns for SQL and Debug toggles
@@ -579,15 +854,6 @@ def main():
                             with col2:
                                 if st.toggle("Show Debug Info", key=f"debug_{message.get('request_id', '')}"):
                                     st.json(message["debug_info"])
-                
-                # Display visualization if present
-                if "visualization" in message:
-                    viz_data = message["visualization"]
-                    if isinstance(viz_data, dict) and "data" in viz_data:
-                        viz_service.create_visualization(
-                            viz_data["data"],
-                            message.get("content", "")
-                        )
 
         # Show loading animation when processing
         if st.session_state.processing:
@@ -624,14 +890,14 @@ def main():
     # Add example questions at the bottom
     st.markdown("### Example Questions")
     example_questions = [
-        "What was the busiest week in spring 2023?",
-        "What day had the most visitors in 2023?", 
-        "Compare Swiss vs foreign tourists in April 2023",
-        "Which industry had the highest spending?",
-        "Show visitor counts for top 3 days in summer 2023?",
-        "Plot the trend of visitors from Germany in 2023",
-        "What percentage of visitors came from Asia in 2023?",
-        "Show me the spending patterns in hotels across different regions"
+        "Show me the daily visitor trend in July 2023 with a line chart",
+        "Compare Swiss vs foreign tourists by month in 2023 using a bar chart", 
+        "Create a pie chart of spending distribution across different industries",
+        "Plot the top 5 countries by visitor count in summer 2023 as a bar chart",
+        "Show weekly visitor trends for spring 2023 as a line graph",
+        "Create a heatmap of spending patterns across different regions",
+        "Plot visitor distribution by origin for each month in 2023",
+        "Visualize daily visitor patterns during July-August 2023 with a line chart"
     ]
 
     # Display examples in a grid of buttons at the bottom
@@ -639,7 +905,8 @@ def main():
     for i, q in enumerate(example_questions):
         with cols[i % 4]:
             if st.button(q, key=f"example_{i}", use_container_width=True):
-                process_query(q)
+                st.session_state.processing = True  # Set processing flag
+                process_query(q, use_streaming=True)  # Force streaming for better visualization handling
 
 # Entry point - call the main function
 if __name__ == "__main__":
