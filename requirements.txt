@@ -26,4 +26,14 @@ httpx==0.28.1
 vanna==0.0.26
 geopandas==0.14.2
 shapely==2.0.2
-altair==5.2.0 
+altair==5.2.0
+matplotlib==3.8.3
+python-docx>=0.8.11
+markdown>=3.3.0
+Pillow>=8.0.0
+click>=7.0
+beautifulsoup4>=4.11.1
+lxml>=4.9.1
+mdx-gh-links>=0.2
+mdx-truly-sane-lists>=1.3
+pymdown-extensions>=9.5 

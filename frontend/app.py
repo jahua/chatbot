@@ -86,7 +86,7 @@ else:
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# --- Initialize session state ONCE ---
+# --- Initialize session state ONCE --- 
 if 'db_config' not in st.session_state:
     print("DEBUG app.py: Initializing st.session_state.db_config...")
     st.session_state.db_config = config.DB_CONFIG
@@ -156,7 +156,7 @@ def check_api_connection():
         return False
     except requests.exceptions.Timeout:
         logger.error("API connection timed out")
-        return False
+            return False
     except Exception as e:
         logger.error(f"Unexpected error checking API connection: {str(e)}")
         return False
@@ -202,28 +202,28 @@ def process_query(query: str, use_streaming: bool = True):
             process_streaming_query(query, request_id)
         else:
             # Non-streaming process
-            api_endpoint = f"{st.session_state.api_url}/chat"
-            response = requests.post(
-                api_endpoint,
+        api_endpoint = f"{st.session_state.api_url}/chat"
+        response = requests.post(
+            api_endpoint,
                 json={
                     "message": query,
                     "session_id": st.session_state.current_chat_id
                 },
-                headers={"Content-Type": "application/json"},
-                timeout=60
-            )
-
-            if response.status_code == 200:
+            headers={"Content-Type": "application/json"},
+            timeout=60
+        )
+        
+        if response.status_code == 200:
                 response_data = response.json()
-                st.session_state.messages.append({
-                    "role": "assistant",
+            st.session_state.messages.append({
+                "role": "assistant",
                     "content": response_data.get("content", "No response content"),
                     "request_id": request_id
-                })
-            else:
+            })
+        else:
                 st.error(
                     f"Error: Server returned status code {response.status_code}")
-
+            
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
         logger.error(f"Error processing query: {str(e)}")
@@ -244,9 +244,9 @@ def process_streaming_query(query: str, request_id: str):
         debug_container = st.empty() if st.session_state.debug_mode else None
 
         # Initialize message data
-        current_message = {
-            "role": "assistant",
-            "content": "",
+    current_message = {
+        "role": "assistant",
+        "content": "",
             "request_id": request_id
         }
 
@@ -264,19 +264,19 @@ def process_streaming_query(query: str, request_id: str):
             stream=True,
             timeout=60
         ) as response:
-            if response.status_code != 200:
+                    if response.status_code != 200:
                 raise Exception(
                     f"API returned status code {response.status_code}")
 
-            client = sseclient.SSEClient(response)
-
+                    client = sseclient.SSEClient(response)
+                    
             # Process events
-            for event in client.events():
-                if not event.data:
-                    continue
-
-                try:
-                    data = json.loads(event.data)
+                    for event in client.events():
+                        if not event.data:
+                            continue
+                            
+                        try:
+                            data = json.loads(event.data)
                     event_type = data.get("type", "")
 
                     if event_type == "content":
@@ -284,16 +284,16 @@ def process_streaming_query(query: str, request_id: str):
                         current_message["content"] += content
                         with content_container:
                             st.markdown(current_message["content"])
-
-                    elif event_type == "sql_query":
+                                
+                            elif event_type == "sql_query":
                         sql_query = data.get("sql_query", "")
                         current_message["sql_query"] = sql_query
                         with sql_container:
                             if st.session_state.debug_mode:
                                 with st.expander("View SQL Query"):
                                     st.code(sql_query, language="sql")
-
-                    elif event_type == "visualization":
+                                
+                            elif event_type == "visualization":
                         viz_data = data.get("visualization", {})
                         if viz_data:
                             try:
@@ -324,26 +324,26 @@ def process_streaming_query(query: str, request_id: str):
                                     f"Error displaying visualization: {str(e)}")
                                 logger.error(
                                     f"Visualization error: {str(e)}\nData: {viz_data}")
-
-                    elif event_type == "debug":
+                                
+                            elif event_type == "debug":
                         if st.session_state.debug_mode and debug_container:
                             debug_info = data.get("debug_info", {})
                             current_message["debug_info"] = debug_info
                             with debug_container:
                                 with st.expander("Debug Info"):
                                     st.json(debug_info)
-
-                    elif event_type == "end":
+                                
+                            elif event_type == "end":
                         # Add the final message to session state only if it has
                         # content
                         if current_message.get(
                                 "content") or current_message.get("visualization"):
                             st.session_state.messages.append(current_message)
-                        break
-
-                except json.JSONDecodeError as e:
+                                break
+                                
+                        except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse event data: {e}")
-                    continue
+                            continue
                 except Exception as e:
                     logger.error(f"Error processing event: {e}")
                     continue
@@ -630,7 +630,7 @@ def create_visualization(data, viz_type="auto"):
                 use_container_width=True,
                 height=300
             )
-
+                    
     except Exception as e:
         st.error(f"Error creating visualization: {str(e)}")
         st.write("Debug: Full error:", traceback.format_exc())
@@ -643,7 +643,7 @@ def display_rag_flow(steps: List[Dict[str, Any]],
         cols = st.columns([1, 4])
 
         for i, step in enumerate(steps):
-            step_name = step.get("name", f"Step {i+1}")
+                step_name = step.get("name", f"Step {i+1}")
             step_description = step.get("description", "")
             step_success = step.get("success", True)
 
@@ -685,7 +685,7 @@ def display_message(message: Dict[str, Any]) -> None:
 
         # For assistant messages, show additional info in a more organized way
         if message["role"] == "assistant":
-            # Display visualization if present
+                # Display visualization if present
             if "visualization" in message:
                 try:
                     viz_data = message["visualization"]
@@ -844,10 +844,10 @@ with st.sidebar:
 def main():
     """Main function to run the Streamlit application"""
     # Title and description
-    st.title("Tourism Data Insights Chatbot 💬")
-    st.markdown("""
-    Ask questions about Swiss tourism data to get insights and visualizations.
-    """)
+        st.title("Tourism Data Insights Chatbot 💬")
+        st.markdown("""
+        Ask questions about Swiss tourism data to get insights and visualizations.
+        """)
 
     # Create a container for status
     status_container = st.container()
@@ -870,14 +870,14 @@ def main():
         unsafe_allow_html=True)
 
     # Create a container for the main chat interface
-    chat_container = st.container()
-
+        chat_container = st.container()
+        
     # Create a container for the input form
     input_container = st.container()
 
     # Display chat history in the main container
-    with chat_container:
-        for message in st.session_state.messages:
+        with chat_container:
+            for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 # Display the main content
                 st.markdown(message.get("content", ""))
@@ -982,7 +982,7 @@ def main():
 
     # Add example questions at the bottom
     st.markdown("### Example Questions")
-    example_questions = [
+        example_questions = [
         "Show me the daily visitor trend in July 2023 with a line chart",
         "Create a pie chart of spending distribution across different industries",
         "Display weekly visitor trends for the first quarter of 2023",
@@ -994,7 +994,7 @@ def main():
     col1, col2 = st.columns(2)
 
     # Display examples in two columns with better styling
-    for i, question in enumerate(example_questions):
+        for i, question in enumerate(example_questions):
         with col1 if i % 2 == 0 else col2:
             if st.button(
                 question,

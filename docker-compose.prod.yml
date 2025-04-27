@@ -4,14 +4,13 @@ services:
   backend:
     image: jahua/chatbot-backend:latest
     ports:
-      - "8080:8000"
+      - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:336699@host.docker.internal:5432/trip_dw_local
-      - POSTGRES_HOST=host.docker.internal
+      - POSTGRES_HOST=3.76.40.121
       - POSTGRES_PORT=5432
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=336699
-      - POSTGRES_DB=trip_dw_local
+      - POSTGRES_DB=trip_dw
       - CHROMA_HOST=chroma
       - CHROMA_PORT=8000
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -20,8 +19,6 @@ services:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -37,17 +34,13 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - type: bind
-        source: ./app/static/geojson/shapes
-        target: /app/static/geojson/shapes
-        read_only: true
+      - static_volume:/app/static:ro
     environment:
-      - DATABASE_URL=postgresql://postgres:336699@host.docker.internal:5432/trip_dw_local
-      - POSTGRES_HOST=host.docker.internal
+      - POSTGRES_HOST=3.76.40.121
       - POSTGRES_PORT=5432
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=336699
-      - POSTGRES_DB=trip_dw_local
+      - POSTGRES_DB=trip_dw
       - API_URL=http://backend:8000
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_API_BASE=${OPENAI_API_BASE}
@@ -55,8 +48,6 @@ services:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/healthz"]
       interval: 30s
@@ -71,12 +62,12 @@ services:
     image: ghcr.io/chroma-core/chroma:latest
     volumes:
       - index_data:/chroma/chroma
+    ports:
+      - "8006:8000"
     environment:
       - ALLOW_RESET=true
-      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HOST=chroma
       - CHROMA_SERVER_PORT=8000
-    ports:
-      - "8001:8000"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
@@ -92,4 +83,10 @@ networks:
 
 volumes:
   index_data:
-    driver: local 
+    driver: local
+  static_volume:
+    driver: local
+    driver_opts:
+      type: none
+      device: /home/ubuntu/docker-apps/chatbot/static
+      o: bind 

@@ -111,15 +111,8 @@ def connect_to_db():
 def load_shapefile_data():
     """Load data from Ticino shapefile or create fallback data"""
     try:
-        # Get the script's directory
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        # Construct path relative to the script location (up two levels, then into app/static...)
-        # Assumes structure: project_root/frontend/pages/script.py and project_root/app/static/...
-        project_root_guess = os.path.join(script_dir, '..', '..')
-        shapefile_path = os.path.join(project_root_guess, 'app', 'static', 'geojson', 'shapes', 'g1b23.shp')
-        
-        # Normalize the path (optional, but good practice)
-        shapefile_path = os.path.normpath(shapefile_path)
+        # In Docker, the app directory is at the root
+        shapefile_path = '/app/static/geojson/shapes/g1b23.shp'
         
         st.sidebar.info(f"Attempting to load shapefile from: {shapefile_path}")
         
