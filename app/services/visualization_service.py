@@ -608,7 +608,8 @@ class VisualizationService:
             
             logger.info(f"Successfully created time series chart for columns: {y_cols}")
             
-            return {
+            # ---> ADD LOGGING BEFORE RETURN <--- 
+            result_dict = {
                 "type": "plotly_json",
                 "data": json.loads(
                     json.dumps(
@@ -616,6 +617,9 @@ class VisualizationService:
                         cls=PlotlyJSONEncoder)),
                 "raw_data": df_sorted.to_dict('records') # Use sorted data
             }
+            logger.debug(f"_create_time_series returning dict with keys: {result_dict.keys()} and type: {result_dict.get('type')}")
+            return result_dict
+            # ---> END LOGGING <--- 
 
         except Exception as e:
             # Log the specific error encountered during time series creation
@@ -1185,7 +1189,13 @@ class VisualizationService:
             }
         }
 
-        return fig
+        # ---> FIX: Return the standard structure <-----
+        return {
+            "type": "plotly_json",
+            "data": json.loads(json.dumps(fig, cls=PlotlyJSONEncoder)), # fig is already the dict here
+            "raw_data": df_sorted.to_dict('records')
+        }
+        # ---> END FIX <-----
 
     def _create_simple_line_chart(
             self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
@@ -1430,6 +1440,11 @@ class VisualizationService:
                 result["data"] = json.loads(
                     json.dumps(fig_dict, cls=PlotlyJSONEncoder))
 
+            # ---> ADD LOGGING BEFORE FINAL RETURN <---            
+            final_type = result.get('type') if isinstance(result, dict) else type(result)
+            final_keys = result.keys() if isinstance(result, dict) else 'N/A'
+            logger.debug(f"_create_visualization_with_fallbacks returning. Type: {final_type}, Keys: {final_keys}")
+            # ---> END LOGGING <--- 
             return result
 
         except Exception as e:
