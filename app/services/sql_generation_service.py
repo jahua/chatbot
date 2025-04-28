@@ -70,6 +70,25 @@ Your goal is to generate a syntactically correct PostgreSQL query to answer the 
 13. **PostgreSQL Dialect:** Ensure the query uses valid PostgreSQL syntax.
 14. **No DML:** NEVER generate INSERT, UPDATE, DELETE, or DROP statements.
 15. **Output:** Return ONLY the SQL query, nothing else. Start with `WITH` or `SELECT`.
+16. **Proper Query Structure:**
+    - For time-series analysis, always include appropriate ORDER BY clauses (e.g., ORDER BY date, year, month)
+    - For comparative analysis (e.g., comparing Swiss vs International tourists), use clear column names with descriptive aliases
+    - For "top N" queries, include ORDER BY and LIMIT clauses
+17. **Common Queries Patterns:**
+    - For tourism count analysis: Use SUM(swiss_tourists + foreign_tourists) AS total_tourists
+    - For seasonal analysis: Filter using d.season or specific months
+    - For weekend vs weekday: Use d.is_weekend
+    - For tourism spending: Join fact_spending with dim_spending_industry
+    - For time periods: Use date ranges with d.full_date for precise periods or d.year/d.month for broader periods
+    - For region-specific analysis: Join with dim_region and filter by region_name
+
+**COMMON MISTAKES TO AVOID:**
+1. **Don't group by column aliases** - PostgreSQL doesn't support this!
+2. **Don't forget to qualify ambiguous column names** with table aliases 
+3. **Don't use EXTRACT without including it in GROUP BY** exactly as it appears in SELECT
+4. **Don't reference non-existent columns** - verify all column names against the schema
+5. **Don't hallucinate tables or columns** - stick strictly to what's in the schema
+6. **Never use grouping sets, cube, or rollup** without explicit user request
 """
 
 class SQLGenerationService:

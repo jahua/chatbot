@@ -4,7 +4,8 @@ from typing import Dict, Any, Optional, List, Tuple
 import os
 import traceback
 import asyncio
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 
 from app.rag.debug_service import DebugService
 from app.utils.intent_parser import QueryIntent
@@ -14,6 +15,18 @@ from app.core.config import settings
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def custom_json_serializer(obj):
+    """Convert Decimal, date, and datetime objects for JSON serialization."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    try:
+        # Let default encoder handle others or raise TypeError
+        return json.JSONEncoder.default(None, obj)
+    except TypeError:
+         raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 class ResponseGenerationService:
     """Service for generating natural language responses to user queries"""
@@ -267,74 +280,101 @@ class ResponseGenerationService:
         visualization_info: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None
     ) -> str:
-        """Create a prompt for response generation"""
-        # Get the response prompt template
-        prompt_template = self.prompt_config.get_template("response_generation")
+        """
+        Create a prompt for generating a natural language response based on query and results
         
-        # Format the SQL results as a string, limited to a reasonable size
-        results_str = json.dumps(sql_results, indent=2)
-        if len(results_str) > 10000:  # Limit result size
-            results_str = results_str[:10000] + "...[truncated]"
+        Args:
+            query: The original user query
+            sql_query: Optional SQL query that was executed
+            sql_results: Optional results from SQL query execution
+            intent: Optional detected query intent (can be QueryIntent object or string)
+            visualization_info: Optional info about visualization
+            context: Optional additional context
             
-        # Add suggestions for alternative queries when no results are found
-        alternative_suggestions = []
-        if not sql_results or (isinstance(sql_results, list) and len(sql_results) == 0):
-            # Generate contextual suggestions based on the query
-            query_lower = query.lower()
-            
-            # Region-specific suggestions
-            if any(region in query_lower for region in ["lugano", "locarno", "bellinzona", "mendrisio", "city"]):
-                alternative_suggestions.append(f"Try a different region like 'Lugano', 'Locarno', or 'Bellinzona'")
-                alternative_suggestions.append(f"Show me tourism trends across all of Ticino")
-            else:
-                alternative_suggestions.append(f"How many tourists visited Lugano in 2023?")
-                alternative_suggestions.append(f"Show me tourism trends for a specific region in Ticino")
-            
-            # Time-specific suggestions
-            if any(time_term in query_lower for time_term in ["year", "month", "season", "summer", "winter", "2023", "2022"]):
-                alternative_suggestions.append(f"What about tourism in a different time period?")
-                alternative_suggestions.append(f"Compare tourism between summer and winter months")
-            else:
-                alternative_suggestions.append(f"Tourism statistics for summer 2023")
-                alternative_suggestions.append(f"Compare winter vs summer tourism patterns")
-            
-            # Spending-specific suggestions
-            if "spending" in query_lower or "expenditure" in query_lower:
-                alternative_suggestions.append(f"Which industry had the highest spending?")
-                alternative_suggestions.append(f"Compare spending between different tourism sectors")
-            else:
-                alternative_suggestions.append(f"What was the breakdown of tourism spending by industry?")
-            
-            # Visitor type suggestions
-            if "tourist" in query_lower or "visitor" in query_lower:
-                alternative_suggestions.append(f"Compare Swiss tourists vs foreign tourists")
-                alternative_suggestions.append(f"Which region had the most visitors?")
-            else:
-                alternative_suggestions.append(f"How do Swiss and foreign tourist numbers compare?")
-                
-            # Always include a few general alternatives
-            alternative_suggestions.append(f"Show me the busiest period for tourism in Ticino")
-            
-            # Remove duplicates and limit to 5 suggestions
-            alternative_suggestions = list(dict.fromkeys(alternative_suggestions))[:5]
-            
-        # Format the values for the prompt
-        prompt_values = {
-            "user_query": query,
-            "sql_query": sql_query if sql_query else "No SQL query was executed.",
-            "sql_results": results_str if sql_results else "No results available.",
-            "query_intent": intent.value if intent else "unknown",
-            "visualization_info": visualization_info if visualization_info else "No visualization was created.",
-            "alternative_suggestions": json.dumps(alternative_suggestions)
-        }
+        Returns:
+            A prompt for the LLM
+        """
+        # Basic structure of the prompt
+        has_results = sql_results is not None and len(sql_results) > 0
         
-        # Add any additional context
+        # Handle both QueryIntent objects and string intents
+        if intent is None:
+            intent_str = "unknown"
+        elif hasattr(intent, 'value'):
+            intent_str = intent.value
+        else:
+            intent_str = str(intent)
+        
+        # Safely serialize results, handling Decimal and Date/Datetime
+        try:
+            result_str = json.dumps(sql_results, indent=2, default=custom_json_serializer) if has_results else "No results found."
+        except TypeError as e:
+            logger.error(f"Error serializing SQL results to JSON: {e}")
+            result_str = "[Error: Could not serialize results]"
+        
+        # Base prompt
+        prompt = f"""
+You are an AI assistant for a tourism analytics dashboard. You need to respond to a user query based on SQL results.
+
+Original User Query: {query}
+"""
+        # Add SQL query if available
+        if sql_query:
+            prompt += f"\nSQL Query Executed: {sql_query}\n"
+        
+        # Add SQL results if available
+        if has_results:
+            prompt += f"\nSQL Results: {result_str}\n"
+        else:
+            prompt += "\nNo data was found for this query.\n"
+        
+        # Add intent information
+        prompt += f"\nQuery Intent: {intent_str}\n"
+        
+        # Add visualization information
+        if visualization_info:
+            prompt += f"\nVisualization Info: {visualization_info}\n"
+        
+        # Add context information
+        context_info = []
         if context:
-            prompt_values.update(context)
-            
-        # Format the prompt template with the values
-        prompt = prompt_template.format(**prompt_values)
-        return prompt 
+            for key, value in context.items():
+                if key != "schema" and value:  # Skip large schema information
+                    if isinstance(value, (dict, list)):
+                        context_info.append(f"{key}: {json.dumps(value)}")
+                    else:
+                        context_info.append(f"{key}: {value}")
+        
+        if context_info:
+            prompt += f"\nAdditional Context:\n" + "\n".join(context_info) + "\n"
+        
+        # Include task instructions to guide the response
+        prompt += """
+Your task is to analyze the SQL results and provide a natural, conversational response to the user's query.
+The response should:
+1. Be concise and to the point
+2. Highlight key findings or trends from the data
+3. Reference specific numbers or statistics when relevant
+4. Include insights that might be useful for tourism analysis
+
+If no data was found, politely inform the user and suggest they try alternative queries as mentioned in the suggestions.
+
+IMPORTANT GUIDELINES:
+1. Focus on answering only what was asked - don't expand unnecessarily into unrelated areas
+2. Be precise with numbers - use proper formatting (e.g., "1,234,567" not "1234567")
+3. For percentages, specify the precise meaning (e.g., "a 10% increase" rather than just "10%")
+4. When mentioning time periods, be explicit (e.g., "during the summer of 2023" rather than just "during summer")
+5. For comparisons, provide both absolute and relative differences when possible
+6. If the query requires a specific tourism metric, explain its meaning briefly
+7. Maintain specificity - use exact region/location names from the results
+8. For year-over-year or period-over-period comparisons, highlight notable changes
+9. For very small or very large values, consider providing context for scale
+10. Avoid making claims not supported by the data
+
+Please respond only with the final answer to the user, in a conversational tone. Do not include any preamble like "Based on the data" or "According to the SQL results".
+"""
+        
+        return prompt
 
     def _enhance_response_with_visualization_info(
         self, response: str, visualization_info: Optional[Dict[str, Any]]) -> str:
@@ -343,21 +383,36 @@ class ResponseGenerationService:
         if not visualization_info or not isinstance(visualization_info, dict):
             return response
         
-        # Check for Swiss and international tourist visualization
-        if (visualization_info.get("type") == "plotly" and 
-            isinstance(visualization_info.get("data"), dict) and
-            isinstance(visualization_info.get("data").get("layout"), dict) and
-            "Swiss and International Tourists" in str(visualization_info.get("data").get("layout").get("title", ""))):
+        try:
+            # Get visualization type
+            vis_type = visualization_info.get("type", "")
             
-            # Add a specific message for the monthly tourist comparison
-            visualization_message = (
-                "\n\nI've created a bar chart visualization comparing Swiss and international "
-                "tourists per month. The chart shows the distribution of both visitor types "
-                "throughout the year, allowing you to see seasonal patterns and compare "
-                "domestic vs. international tourism flows."
-            )
-            
-            # Add the message to the response
-            return response + visualization_message
+            # Check for valid plotly visualization
+            if vis_type == "plotly" and isinstance(visualization_info.get("data"), dict):
+                layout = visualization_info.get("data", {}).get("layout", {})
+                title = ""
+                
+                # Handle different ways the title might be stored
+                if isinstance(layout, dict):
+                    if isinstance(layout.get("title"), str):
+                        title = layout.get("title", "")
+                    elif isinstance(layout.get("title"), dict):
+                        title = layout.get("title", {}).get("text", "")
+                
+                # Check for Swiss and international tourist visualization
+                if "Swiss" in title and "International" in title and "Tourist" in title:
+                    # Add a specific message for the monthly tourist comparison
+                    visualization_message = (
+                        "\n\nI've created a bar chart visualization comparing Swiss and international "
+                        "tourists per month. The chart shows the distribution of both visitor types "
+                        "throughout the year, allowing you to see seasonal patterns and compare "
+                        "domestic vs. international tourism flows."
+                    )
+                    
+                    # Add the message to the response
+                    return response + visualization_message
+        except Exception as e:
+            logger.error(f"Error enhancing response with visualization info: {str(e)}")
         
+        # Default case - return original response
         return response 

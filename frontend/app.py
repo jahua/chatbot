@@ -161,6 +161,77 @@ def check_api_connection():
         logger.error(f"Unexpected error checking API connection: {str(e)}")
         return False
 
+# Helper function for displaying visualization data
+def display_visualization_data(viz_data):
+    # Initial check: If viz_data is None or not a dict, display info and return.
+    if not viz_data or not isinstance(viz_data, dict):
+        # Log this occurrence for debugging
+        logger.warning(f"display_visualization_data called with invalid data: {type(viz_data)}, value: {str(viz_data)[:100]}")
+        st.info("No visualization data received or data is in an invalid format.")
+        return
+        
+    # ---> ADDED LOGGING BEFORE THE SUSPECTED ERROR LINE <---    
+    logger.debug(f"Inside display_visualization_data. Type(viz_data): {type(viz_data)}, Value: {str(viz_data)[:200]}...")
+    # -------------------------------------------------------
+
+    viz_type = viz_data.get("type")
+    
+    # ---> ADDED LOGGING AFTER .get('type') <---    
+    logger.debug(f"Got viz_type: {viz_type} (type: {type(viz_type)})")
+    # -------------------------------------------
+
+    if viz_type == "plotly_json":
+        # Log entry into plotly block
+        logger.debug("Processing viz_type: plotly_json")
+        fig_data = viz_data.get("data", {}) # This .get() would fail if viz_data was None
+        if fig_data:
+            # Check if fig_data itself is a string that needs loading
+            if isinstance(fig_data, str):
+                try:
+                    fig_data = json.loads(fig_data)
+                except json.JSONDecodeError:
+                    st.error("Failed to parse Plotly JSON string.")
+                    return
+            # Ensure fig_data is a dict before creating Figure
+            if isinstance(fig_data, dict):
+                 try:
+                    fig = go.Figure(fig_data)
+                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
+                 except Exception as plot_err:
+                     st.error(f"Error rendering Plotly chart: {plot_err}")
+                     st.json(fig_data) # Show raw data on error
+            else:
+                st.error("Invalid format for Plotly data.")
+                st.json(fig_data) # Show the problematic data
+        else:
+            st.info("No data provided for Plotly visualization.")
+            
+    elif viz_type == "table":
+        # Log entry into table block
+        logger.debug("Processing viz_type: table")
+        table_data = viz_data.get("data", []) # This .get() would fail if viz_data was None
+        if table_data:
+            df = pd.DataFrame(table_data)
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No data available for table visualization.")
+            
+    elif viz_type == "no_data":
+         # Log entry into no_data block
+         logger.debug("Processing viz_type: no_data")
+         st.info("No data available to create a visualization.")
+         
+    elif viz_type:
+        # Handle other potential simple types or show raw
+        logger.warning(f"Processing viz_type: Unsupported type '{viz_type}'")
+        st.warning(f"Unsupported or unrecognized visualization type: '{viz_type}'")
+        st.json(viz_data) 
+    else:
+        # If type is missing, show raw data
+        logger.warning("Processing viz_type: Type is missing/None")
+        st.warning("Visualization type missing.")
+        st.json(viz_data)
+
 # --- Define process_query function EARLY ---
 
 
@@ -279,7 +350,11 @@ def process_streaming_query(query: str, request_id: str):
                     data = json.loads(event.data)
                     event_type = data.get("type", "")
 
-                    if event_type == "content":
+                    if event_type == "status":
+                        # Optionally display status updates (e.g., in a temporary area)
+                        # st.info(data.get("status", "Processing..."))
+                        pass # Often, just logging is enough
+                    elif event_type == "content":
                         content = data.get("content", "")
                         current_message["content"] += content
                         with content_container:
@@ -294,52 +369,82 @@ def process_streaming_query(query: str, request_id: str):
                                     st.code(sql_query, language="sql")
                                 
                     elif event_type == "visualization":
-                        viz_data = data.get("visualization", {})
-                        if viz_data:
+                        # Get data, default to None if missing
+                        viz_data = data.get("visualization", None) 
+                        # Only store and attempt to display if data is not None
+                        if viz_data: 
+                            current_message["visualization"] = viz_data # Store for final message
                             try:
                                 with viz_container:
-                                    if viz_data.get("type") == "plotly_json":
-                                        # Parse the Plotly figure data
-                                        fig_data = viz_data.get("data", {})
-                                        if fig_data:
-                                            fig = go.Figure(fig_data)
-                                            st.plotly_chart(
-                                                fig, use_container_width=True, config={
-                                                    'displayModeBar': True})
-                                    elif viz_data.get("type") == "table":
-                                        # Display as table
-                                        df = pd.DataFrame(
-                                            viz_data.get("data", []))
-                                        if not df.empty:
-                                            st.dataframe(
-                                                df, use_container_width=True)
-                                        else:
-                                            st.info(
-                                                "No data available for visualization")
-                                    else:
-                                        st.warning(
-                                            "Unsupported visualization type")
+                                    st.empty() # Clear previous viz attempts
+                                    # Log before calling
+                                    logger.debug(f"Calling display_visualization_data (intermediate). Type: {type(viz_data)}, Value: {str(viz_data)[:100]}...") 
+                                    display_visualization_data(viz_data)
                             except Exception as e:
-                                st.error(
-                                    f"Error displaying visualization: {str(e)}")
-                                logger.error(
-                                    f"Visualization error: {str(e)}\nData: {viz_data}")
+                                st.error(f"Error displaying visualization: {str(e)}")
+                                logger.error(f"Visualization error: {str(e)}\nData: {str(viz_data)[:500]}") # Log more data on error
+                        else:
+                             # If viz_data is None from the start, ensure it's None in current_message too
+                             current_message["visualization"] = None
+                             logger.debug("Intermediate visualization data is None. Skipping display.")
+
+                    elif event_type == "final_response":
+                        # This chunk contains the complete final state
+                        current_message["content"] = data.get("content", current_message["content"]) # Use final content
+                        current_message["sql_query"] = data.get("sql_query", current_message.get("sql_query"))
+                        current_message["visualization"] = data.get("visualization", current_message.get("visualization"))
+                        current_message["debug_info"] = data.get("debug_info", current_message.get("debug_info"))
+                        
+                        # Update UI with final content
+                        with content_container:
+                            st.markdown(current_message["content"])
+                        
+                        # Update visualization display only if final data exists
+                        final_viz_data = data.get("visualization", current_message.get("visualization"))
+                        current_message["visualization"] = final_viz_data # Store final state
+                        
+                        # Update visualization display only if final data exists
+                        if final_viz_data: 
+                            try:
+                                with viz_container:
+                                    st.empty() # Clear previous viz attempts
+                                    # Log before calling
+                                    logger.debug(f"Calling display_visualization_data (final). Type: {type(final_viz_data)}, Value: {str(final_viz_data)[:100]}...")
+                                    display_visualization_data(final_viz_data)
+                            except Exception as e:
+                                st.error(f"Error displaying final visualization: {str(e)}")
+                                logger.error(f"Final Visualization error: {str(e)}\nData: {str(final_viz_data)[:500]}") # Log more data on error
+                        else:
+                            # Ensure viz container is empty if no final visualization
+                            with viz_container: 
+                                st.empty()
+                            logger.debug("Final visualization data is None. Skipping display.")
+                        
+                        # Update debug info if needed
+                        if st.session_state.debug_mode and debug_container and current_message.get("debug_info"):
+                             with debug_container:
+                                with st.expander("Debug Info (Final)"):
+                                    st.json(current_message["debug_info"])
+                        
+                        # Add the final message to session state
+                        st.session_state.messages.append(current_message)
+                        logger.info("Final response processed and added to messages.")
+                        break # End processing after final response
                                 
-                    elif event_type == "debug":
-                        if st.session_state.debug_mode and debug_container:
-                            debug_info = data.get("debug_info", {})
-                            current_message["debug_info"] = debug_info
-                            with debug_container:
-                                with st.expander("Debug Info"):
-                                    st.json(debug_info)
-                                
-                    elif event_type == "end":
-                        # Add the final message to session state only if it has
-                        # content
-                        if current_message.get(
-                                "content") or current_message.get("visualization"):
-                            st.session_state.messages.append(current_message)
-                        break
+                    elif event_type == "error":
+                        error_content = data.get("content", "An unknown error occurred.")
+                        st.error(error_content)
+                        current_message["content"] = error_content # Store error in message
+                        current_message["status"] = "error"
+                        st.session_state.messages.append(current_message)
+                        logger.error(f"Received error chunk: {error_content}")
+                        break # Stop processing on error
+                    
+                    # Remove the old 'end' event logic as final_response handles completion
+                    # elif event_type == "end":
+                    #    if current_message.get("content") or current_message.get("visualization"):
+                    #        st.session_state.messages.append(current_message)
+                    #    break
                                 
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse event data: {e}")
@@ -685,84 +790,72 @@ def display_message(message: Dict[str, Any]) -> None:
 
         # For assistant messages, show additional info in a more organized way
         if message["role"] == "assistant":
-                # Display visualization if present
-            if "visualization" in message:
+            
+            # --- MODIFIED VISUALIZATION HANDLING --- 
+            # Check if key exists AND if the value is not None
+            viz_data = message.get("visualization") # Use .get() for safety
+            if viz_data is not None:
+                logger.debug(f"display_message found visualization data (type: {type(viz_data)}). Preparing to display.")
                 try:
-                    viz_data = message["visualization"]
-                    if viz_data.get("type") == "plotly_json":
-                        # Create tabs for visualization and data
-                        viz_tab, data_tab = st.tabs(
-                            ["📈 Visualization", "📊 Data"])
-
-                        with viz_tab:
-                            # Parse the Plotly figure from JSON
-                            fig_dict = viz_data.get("data", {})
-                            if isinstance(fig_dict, str):
-                                fig_dict = json.loads(fig_dict)
-                            fig = go.Figure(fig_dict)
-
-                            # Update layout for dark theme and responsiveness
-                            fig.update_layout(
-                                template="plotly_dark",
-                                margin=dict(l=20, r=20, t=40, b=20),
-                                height=500,
-                                paper_bgcolor="rgba(0,0,0,0)",
-                                plot_bgcolor="rgba(17,17,17,0.1)",
-                                font=dict(color="white")
-                            )
-
-                            # Display the Plotly chart
-                            st.plotly_chart(
-                                fig,
-                                use_container_width=True,
-                                config={
-                                    'displayModeBar': True,
-                                    'displaylogo': False,
-                                    'scrollZoom': True})
-
-                        with data_tab:
-                            if "raw_data" in viz_data:
-                                df = pd.DataFrame(viz_data["raw_data"])
+                    # Create tabs for visualization and data
+                    viz_tab, data_tab = st.tabs(["📈 Visualization", "📊 Data"])
+                    
+                    with viz_tab:
+                        # *** CALL THE HELPER FUNCTION ***
+                        display_visualization_data(viz_data)
+                            
+                    with data_tab:
+                        # Display raw data if available within the viz_data dict
+                        raw_data = viz_data.get("raw_data")
+                        if raw_data and isinstance(raw_data, list):
+                            try:
+                                df = pd.DataFrame(raw_data)
                                 st.dataframe(df, use_container_width=True)
-
-                    elif viz_data.get("type") in ["table", "no_data"]:
-                        st.write(viz_data.get("data", {}))
-
-                    else:
-                        # Fallback to DataFrame visualization
-                        if isinstance(viz_data, (list, dict)):
-                            df = pd.DataFrame(
-                                viz_data if isinstance(
-                                    viz_data, list) else [viz_data])
-                            st.dataframe(df, use_container_width=True)
+                                logger.debug("Displayed raw_data in data tab.")
+                            except Exception as df_err:
+                                st.error(f"Failed to display raw data table: {df_err}")
+                                logger.error(f"Error creating DataFrame from raw_data: {df_err}")
+                                st.json(raw_data) # Show raw data if table fails
                         else:
-                            st.write(viz_data)
+                            # If no specific raw_data key, maybe show the whole viz_data as fallback?
+                            # Or indicate no separate raw data is available.
+                            st.info("No separate raw data available for this visualization.")
+                            # Optionally display the viz_data dict itself for debugging:
+                            # st.json(viz_data)
 
                 except Exception as e:
-                    st.error(f"Error displaying visualization: {str(e)}")
-                    logger.error(
-                        f"Visualization error: {str(e)}\nData: {viz_data}")
+                    # Catch errors during tab creation or helper call
+                    st.error(f"Error displaying visualization section: {str(e)}") 
+                    logger.error(f"Error in display_message visualization block: {str(e)}", exc_info=True)
+                    # Display raw viz_data if error occurs
+                    st.json(viz_data)
+            # else: # Optional: Log if visualization key exists but is None
+            #    if "visualization" in message:
+            #         logger.debug("display_message: 'visualization' key exists but value is None.")
+            # --- END MODIFIED VISUALIZATION HANDLING ---
 
             # Create columns for SQL and Debug toggles
-            if "sql_query" in message or (
-                    "debug_info" in message and st.session_state.debug_mode):
+            # Check if key exists before accessing
+            sql_query = message.get("sql_query")
+            debug_info = message.get("debug_info")
+            request_id = message.get("request_id", uuid.uuid4()) # Generate fallback key if needed
+            
+            if sql_query or (debug_info and st.session_state.debug_mode):
                 col1, col2 = st.columns([1, 1])
 
                 # SQL Query toggle
-                if "sql_query" in message:
+                if sql_query:
                     with col1:
-                        if st.toggle(
-                            "Show SQL Query",
-                                key=f"sql_{message.get('request_id', '')}"):
-                            st.code(message["sql_query"], language="sql")
+                        # Use unique key based on request_id
+                        if st.toggle("Show SQL Query", key=f"sql_{request_id}"):
+                            st.code(sql_query, language="sql")
 
                 # Debug info toggle
-                if st.session_state.debug_mode and "debug_info" in message:
+                if st.session_state.debug_mode and debug_info:
                     with col2:
-                        if st.toggle(
-                            "Show Debug Info",
-                                key=f"debug_{message.get('request_id', '')}"):
-                            st.json(message["debug_info"])
+                         # Use unique key based on request_id
+                        if st.toggle("Show Debug Info", key=f"debug_{request_id}"):
+                            st.json(debug_info)
 
 
 # Sidebar for chat history and settings
@@ -878,75 +971,9 @@ def main():
     # Display chat history in the main container
     with chat_container:
         for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                # Display the main content
-                st.markdown(message.get("content", ""))
-
-                # For assistant messages, show additional info in a more
-                # organized way
-                if message["role"] == "assistant":
-                    # Display visualization if present
-                    if "visualization" in message:
-                        try:
-                            viz_data = message["visualization"]
-                            if viz_data.get("type") == "plotly_json":
-                                # Create tabs for visualization and data
-                                viz_tab, data_tab = st.tabs(
-                                    ["📈 Visualization", "📊 Data"])
-
-                                with viz_tab:
-                                    # Load the Plotly figure from JSON
-                                    fig_dict = viz_data.get("data", {})
-                                    fig = go.Figure(fig_dict)
-
-                                    # Update layout for dark theme and
-                                    # responsiveness
-                                    fig.update_layout(
-                                        template="plotly_dark",
-                                        margin=dict(l=20, r=20, t=40, b=20),
-                                        height=500,
-                                        paper_bgcolor="rgba(0,0,0,0)",
-                                        plot_bgcolor="rgba(17,17,17,0.1)",
-                                        font=dict(color="white")
-                                    )
-
-                                    # Display the Plotly chart
-                                    st.plotly_chart(
-                                        fig, use_container_width=True, config={
-                                            'displayModeBar': True, 'displaylogo': False, 'scrollZoom': True})
-
-                                with data_tab:
-                                    if "raw_data" in viz_data:
-                                        df = pd.DataFrame(viz_data["raw_data"])
-                                        st.dataframe(
-                                            df, use_container_width=True)
-
-                            elif viz_data.get("type") in ["table", "no_data"]:
-                                st.write(viz_data.get("data", {}))
-
-                        except Exception as e:
-                            st.error(
-                                f"Error displaying visualization: {str(e)}")
-                            logger.error(f"Visualization error: {str(e)}")
-
-                    # Create columns for SQL and Debug toggles
-                    if "sql_query" in message or st.session_state.debug_mode:
-                        col1, col2 = st.columns([1, 1])
-
-                        # SQL Query toggle
-                        if "sql_query" in message:
-                            with col1:
-                                if st.toggle(
-                                        "Show SQL Query", key=f"sql_{message.get('request_id', '')}"):
-                                    st.code(
-                                        message["sql_query"], language="sql")
-
-                        # Debug info toggle
-                        if st.session_state.debug_mode and "debug_info" in message:
-                            with col2:
-                                if st.toggle(
-                                        "Show Debug Info", key=f"debug_{message.get('request_id', '')}"):
-                                    st.json(message["debug_info"])
+            # *** CALL THE CORRECTED HELPER FUNCTION ***
+            display_message(message)
+            # *** REMOVE ALL THE DUPLICATED LOGIC THAT WAS HERE ***
 
         # Show loading animation when processing
         if st.session_state.processing:

@@ -17,6 +17,7 @@ from PIL import Image
 from plotly.utils import PlotlyJSONEncoder
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -146,15 +147,47 @@ class VisualizationService:
     def create_visualization(
             self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
         """Create visualization based on query results."""
-        # Check if the user is requesting Swiss vs international tourists visualization
+        
+        # --- Explicit Check for Pie Chart Request ---
+        if ("pie chart" in query.lower() and 
+            ("spending" in query.lower() or "distribution" in query.lower()) and 
+            results and isinstance(results, list) and len(results) > 0):
+            
+            logger.info("Attempting to create requested pie chart for spending/distribution.")
+            try:
+                df = pd.DataFrame(results)
+                # Ensure suitable columns exist (e.g., category and numeric value)
+                if len(df.columns) >= 2:
+                     # Try calling the specific pie chart creation method
+                     pie_chart_viz = self._create_pie_chart(df, query)
+                     if pie_chart_viz:
+                         return pie_chart_viz
+                     else:
+                         logger.warning("_create_pie_chart failed, falling back.")
+                else:
+                     logger.warning("Data not suitable for pie chart (needs >= 2 columns), falling back.")
+            except Exception as pie_err:
+                 logger.error(f"Error during explicit pie chart creation: {pie_err}")
+                 # Fall through to default logic if explicit creation fails
+
+        # --- Existing Check for Monthly Tourist Comparison ---
         if ("swiss" in query.lower() and "tourist" in query.lower() and 
             ("international" in query.lower() or "foreign" in query.lower()) and 
             "month" in query.lower() and 
             ("bar" in query.lower() or "chart" in query.lower() or "visuali" in query.lower())):
             
             logger.info("Creating monthly tourist comparison visualization")
-            return self.create_monthly_tourist_comparison(results, query)
+            # Ensure data is suitable before calling
+            if results and isinstance(results, list) and len(results) > 0:
+                monthly_comp_viz = self.create_monthly_tourist_comparison(results, query)
+                if monthly_comp_viz:
+                     return monthly_comp_viz
+                else:
+                     logger.warning("create_monthly_tourist_comparison failed, falling back.")
+            else:
+                 logger.warning("No data for monthly tourist comparison, falling back.")
         
+        # --- Fallback/Default Logic --- 
         if not results or not isinstance(results, list) or not results:
             logger.warning(
                 "Cannot create visualization: empty or invalid results")
@@ -350,13 +383,19 @@ class VisualizationService:
                 if len(df[categorical_cols[0]].unique()) <= 10:
                     return "bar"
 
-            # Time series pattern: Date column + numeric columns with many rows
-            if date_cols and numeric_cols and num_rows > 5:
+            # Time series pattern: Date column + numeric columns
+            # Allow fewer rows for time series detection
+            if date_cols and numeric_cols and num_rows >= 2:
+                logger.debug(f"Time series pattern matched (rows={num_rows})")
                 # For monthly or yearly comparisons, bar charts often work better
                 if any(term in query.lower() for term in ["by month", "by year", "monthly", "yearly", "per month", "per year"]):
+                    logger.debug("Choosing BAR chart for monthly/yearly time comparison.")
                     return "bar"
                 # Otherwise use line chart for time series
+                logger.debug("Choosing TIME_SERIES chart for general time pattern.")
                 return "time_series"
+            else:
+                logger.debug(f"Time series pattern NOT matched (date_cols: {bool(date_cols)}, numeric_cols: {bool(numeric_cols)}, num_rows: {num_rows})")
 
             # Distribution pattern: Single categorical with percentages or
             # counts
@@ -388,6 +427,7 @@ class VisualizationService:
                 return "table"
 
             # No clear pattern detected
+            logger.debug("No specific data pattern detected by _select_viz_by_data_patterns.")
             return None
 
         except Exception as e:
@@ -496,66 +536,77 @@ class VisualizationService:
         """Create a time series visualization."""
         try:
             # Identify date and numeric columns
-            date_cols = [
-                col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
-            numeric_cols = df.select_dtypes(
-                include=['float64', 'int64']).columns
+            # Find the most likely date column (prefer those with 'date', 'time', 'week', 'month', 'year')
+            potential_date_cols = [col for col in df.columns 
+                                   if self._is_date_column(df[col])]
+            if not potential_date_cols:
+                 raise ValueError("No date/datetime column found for time series.")
+            
+            # Simple heuristic: pick the first one found
+            x_col = potential_date_cols[0] 
+            logger.debug(f"Identified date column for time series: {x_col}")
+            
+            # Identify all numeric columns EXCEPT potentially the date column if it was numeric (e.g., year)
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            # Ensure the selected date column isn't accidentally included if it's also numeric
+            y_cols = [col for col in numeric_cols if col != x_col]
+            
+            if not y_cols:
+                raise ValueError("No suitable numeric columns found for time series values.")
 
-            if not date_cols or len(numeric_cols) == 0:
-                raise ValueError(
-                    "Missing required date or numeric columns for time series")
+            logger.debug(f"Using date column: {x_col}, value columns: {y_cols}")
+            
+            # Sort by date column
+            df_sorted = df.sort_values(by=x_col)
 
-            # Create line chart
+            # Create line chart - px.line handles multiple y-columns automatically
+            logger.debug(f"Creating line chart with px.line(x='{x_col}', y={y_cols})")
             fig = px.line(
-                df,
-                x=date_cols[0],
-                y=numeric_cols,
-                title=self._extract_title_from_query(query) or "Time Series Analysis",
-                template="plotly_dark")
-
-            # Enhance layout
-            fig.update_layout(
-                margin=dict(l=20, r=20, t=40, b=20),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(17,17,17,0.1)",
-                font=dict(color="white"),
-                showlegend=True,
-                xaxis=dict(
-                    rangeslider=dict(visible=True),
-                    gridcolor="rgba(255,255,255,0.1)"
-                ),
-                yaxis=dict(
-                    gridcolor="rgba(255,255,255,0.1)",
-                    tickformat=",.0f"
-                )
+                df_sorted,
+                x=x_col,
+                y=y_cols, # Pass list of numeric columns
+                title=self._extract_title_from_query(query) or "Time Series Trend",
+                template="plotly_dark", # Use dark template
+                markers=True # Add markers for fewer data points
             )
-
-            # Update traces for better visualization
-            for i in range(len(fig.data)):
-                fig.data[i].update(
-                    mode='lines+markers',
-                    line=dict(width=2),
-                    marker=dict(size=6),
-                    hovertemplate=f"<b>{fig.data[i].name}</b><br>Date: %{{x}}<br>Value: %{{y:,.0f}}<extra></extra>"
-                )
-
+            
+            # Customize layout
+            fig.update_layout(
+                 xaxis_title=self._format_column_name(x_col),
+                 yaxis_title="Value", # Generic y-axis title
+                 legend_title="Metric",
+                 margin=dict(l=40, r=20, t=60, b=40)
+            )
+            fig.update_traces(hovertemplate="<b>%{x|%Y-%m-%d}</b><br>%{fullData.name}=%{y:,.2f}<extra></extra>")
+            
+            logger.info(f"Successfully created time series chart for columns: {y_cols}")
+            
             return {
                 "type": "plotly_json",
                 "data": json.loads(
                     json.dumps(
                         fig.to_dict(),
                         cls=PlotlyJSONEncoder)),
-                "raw_data": df.to_dict('records')}
+                "raw_data": df_sorted.to_dict('records') # Use sorted data
+            }
 
         except Exception as e:
-            logger.error(f"Error creating time series: {str(e)}")
-            return self._create_fallback_visualization(
-                df.to_dict('records'), query, str(e))
+            # Log the specific error encountered during time series creation
+            logger.error(f"Error creating time series chart: {str(e)}", exc_info=True) 
+            # Fallback to table representation of the data
+            logger.warning("Falling back to table visualization due to time series error.")
+            # Ensure fallback uses original df, not potentially problematic df_sorted
+            return self._create_fallback_visualization(df.to_dict('records'), query, f"Time series plot failed: {str(e)}")
 
     def _create_bar_chart(self, df: pd.DataFrame,
                           query: str) -> Dict[str, Any]:
         """Create a bar chart visualization"""
         try:
+            # ---> ADDED LOGGING <-----
+            logger.debug(f"_create_bar_chart received data. Dtypes:\n{df.dtypes}")
+            logger.debug(f"First 5 rows:\n{df.head().to_string()}")
+            # -------------------------
+            
             # Special case for Swiss vs International tourists by month
             if ('swiss_tourists' in df.columns and 'foreign_tourists' in df.columns and 
                 'month' in df.columns and 'month_name' in df.columns):
@@ -600,37 +651,49 @@ class VisualizationService:
                 
                 # Convert to plotly json for frontend
                 return {
-                    "type": "plotly",
-                    "data": json.loads(fig.to_json())
+                    "type": "plotly_json", # Changed from plotly to plotly_json for consistency
+                    "data": json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)),
+                    "raw_data": df.to_dict('records')
                 }
             
             # Continue with the original implementation for other cases
             # Identify numeric and categorical columns
             numeric_cols = df.select_dtypes(
-                include=['float64', 'int64']).columns
-            categorical_cols = df.select_dtypes(include=['object']).columns
+                include=['float64', 'int64', 'float32', 'int32', 'int16', 'float16']).columns # Broaden numeric types
+            categorical_cols = df.select_dtypes(include=['object', 'string', 'category']).columns # Broaden categorical
+
+            logger.debug(f"Identified numeric columns: {numeric_cols.tolist()}")
+            logger.debug(f"Identified categorical columns: {categorical_cols.tolist()}")
 
             if len(numeric_cols) == 0:
+                # ---> ADDED LOGGING <-----
+                logger.error("No numeric columns identified in DataFrame for bar chart.")
+                # -------------------------
                 raise ValueError(
                     "No numeric columns found for bar chart values")
 
             # Use first categorical column for x-axis, first numeric for y-axis
             x_col = categorical_cols[0] if len(
-                categorical_cols) > 0 else df.index
+                categorical_cols) > 0 else df.columns[0] # Fallback to first col if no categorical
             y_col = numeric_cols[0]
             
+            logger.debug(f"Using x_col: {x_col}, y_col: {y_col}")
+
             # Check for time-based data
             time_based = False
-            if self._is_date_column(df[x_col]) if isinstance(x_col, str) else False:
-                time_based = True
-                
+            if isinstance(x_col, str) and self._is_date_column(df[x_col]): # Ensure x_col is str
+                 time_based = True
+                 logger.debug(f"Column '{x_col}' identified as time-based.")
+            
             # Sort data appropriately
             if time_based:
                 # For time series, sort by date/time
                 df = df.sort_values(by=x_col)
+                logger.debug(f"Sorted data by time column: {x_col}")
             else:
                 # For categorical, sort by value for better visualization
                 df = df.sort_values(by=y_col, ascending=False)
+                logger.debug(f"Sorted data by value column: {y_col}")
                 
             # Get color scheme based on data
             if len(df) <= 5:
@@ -638,18 +701,20 @@ class VisualizationService:
             elif len(df) <= 10:
                 color_sequence = px.colors.qualitative.Plotly
             else:
-                color_sequence = px.colors.sequential.Blues
+                # Use a sequential color scale for many bars
+                color_sequence = px.colors.sequential.Blues_r # Reversed Blues
 
             # Create bar chart with enhanced styling
             fig = px.bar(
                 df,
                 x=x_col,
                 y=y_col,
-                title=self._extract_title_from_query(query) or "Data Comparison",
-                template="plotly_white",  # Use a clean, modern template
+                title=self._extract_title_from_query(query) or f"Distribution of {self._format_column_name(y_col)}",
+                template="plotly_dark", # Reverted to dark template for consistency
+                color=x_col, # Color bars by category
                 color_discrete_sequence=color_sequence,
-                text=y_col if len(df) <= 15 else None,  # Add value labels for small datasets
-                height=500  # Slightly taller for better readability
+                text=y_col if len(df) <= 15 else None, # Add value labels for small datasets
+                height=500 # Slightly taller for better readability
             )
 
             # Enhance layout
@@ -700,48 +765,67 @@ class VisualizationService:
                 df.to_dict('records'), query, str(e))
 
     def _create_pie_chart(self, df: pd.DataFrame,
-                          query: str) -> Dict[str, Any]:
+                          query: str) -> Optional[Dict[str, Any]]:
         """Create a pie chart visualization."""
         try:
+            logger.info(f"Attempting _create_pie_chart with columns: {df.columns.tolist()}")
             # Identify the numeric column for values
-            numeric_cols = df.select_dtypes(
-                include=['float64', 'int64']).columns
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
             if len(numeric_cols) == 0:
-                raise ValueError(
-                    "No numeric columns found for pie chart values")
+                logger.warning("No numeric columns found for pie chart values.")
+                return None
 
-            # Use the first numeric column for values and the first non-numeric
-            # column for names
+            # Use the first numeric column for values
             value_col = numeric_cols[0]
-            name_col = next(
-                col for col in df.columns if col not in numeric_cols)
+            logger.info(f"Identified value column for pie chart: {value_col}")
+
+            # Identify the first non-numeric column for names (prefer object/string)
+            potential_name_cols = df.select_dtypes(include=['object', 'string', 'category']).columns
+            if len(potential_name_cols) > 0:
+                 name_col = potential_name_cols[0]
+            else:
+                 # Fallback: use the first column that isn't the value column
+                 name_col = next((col for col in df.columns if col != value_col), None)
+            
+            if not name_col:
+                 logger.warning("Could not identify a suitable name column for pie chart.")
+                 return None
+
+            logger.info(f"Identified name column for pie chart: {name_col}")
 
             # Sort values in descending order for better visualization
-            df = df.sort_values(by=value_col, ascending=False)
+            df_sorted = df.sort_values(by=value_col, ascending=False)
+            
+            # Limit slices for readability if necessary (e.g., top 10 + Other)
+            max_slices = 10 
+            if len(df_sorted) > max_slices:
+                logger.info(f"More than {max_slices} slices, grouping smaller ones into 'Other'.")
+                df_top = df_sorted.head(max_slices -1)
+                other_sum = df_sorted.iloc[max_slices-1:][value_col].sum()
+                df_other = pd.DataFrame([{name_col: 'Other', value_col: other_sum}])
+                df_viz = pd.concat([df_top, df_other], ignore_index=True)
+            else:
+                df_viz = df_sorted
 
             # Create pie chart
             fig = px.pie(
-                df,
+                df_viz, # Use potentially grouped data
                 values=value_col,
                 names=name_col,
-                title=self._extract_title_from_query(query) or f"Distribution of {name_col}",
+                title=self._extract_title_from_query(query) or f"Distribution by {self._format_column_name(name_col)}",
                 template="plotly_dark",
                 hole=0.4,
-                color_discrete_sequence=px.colors.qualitative.Set3)
+                color_discrete_sequence=px.colors.qualitative.Pastel)
 
             # Enhance layout
             fig.update_layout(
-                margin=dict(l=20, r=20, t=40, b=20),
+                margin=dict(l=20, r=20, t=60, b=20),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(17,17,17,0.1)",
                 font=dict(color="white", size=12),
-                showlegend=True,
+                showlegend=True, # Show legend for pie
                 legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1,
+                    traceorder="reversed", # Match typical pie order
                     font=dict(size=11)
                 ),
                 title=dict(
@@ -752,11 +836,16 @@ class VisualizationService:
             # Update traces for better hover info and text display
             fig.update_traces(
                 textposition='inside',
-                textinfo='percent+label',
+                textinfo='percent', # Show percentage inside
+                hoverinfo='label+percent+value',
                 hovertemplate="<b>%{label}</b><br>Value: %{value:,.0f}<br>Percentage: %{percent:.1%}<extra></extra>",
                 textfont=dict(
                     size=11,
-                    color="white"))
+                    color="white"),
+                marker=dict(line=dict(color='#000000', width=1)) # Add line between slices
+                )
+            
+            logger.info(f"Successfully created pie chart figure for {name_col} / {value_col}")
 
             return {
                 "type": "plotly_json",
@@ -764,12 +853,12 @@ class VisualizationService:
                     json.dumps(
                         fig.to_dict(),
                         cls=PlotlyJSONEncoder)),
-                "raw_data": df.to_dict('records')}
+                "raw_data": df.to_dict('records')} # Return original full data
 
         except Exception as e:
-            logger.error(f"Error creating pie chart: {str(e)}")
-            return self._create_fallback_visualization(
-                df.to_dict('records'), query, str(e))
+            logger.error(f"Error creating pie chart: {str(e)}", exc_info=True) # Add exc_info
+            # Return None if pie chart creation fails
+            return None
 
     def _create_geo_chart(self, df: pd.DataFrame,
                           query: str) -> Dict[str, Any]:
@@ -1417,20 +1506,28 @@ class VisualizationService:
     def create_monthly_tourist_comparison(self, data: List[Dict[str, Any]], query: str) -> Dict[str, Any]:
         """Create a bar chart comparing Swiss and international tourists by month"""
         try:
+            logger.info(f"Creating monthly tourist comparison with data: {len(data)} rows")
+            
             # If data already includes monthly data for Swiss and foreign tourists, use it
             if data and isinstance(data, list) and len(data) > 0:
                 # Check if we have the necessary columns in the data
                 first_item = data[0]
                 has_month = 'month' in first_item or 'month_name' in first_item
-                has_tourist_data = 'swiss_tourists' in first_item and 'foreign_tourists' in first_item
+                has_tourist_data = (
+                    ('swiss_tourists' in first_item or 'total_swiss_tourists' in first_item) and 
+                    ('foreign_tourists' in first_item or 'total_international_tourists' in first_item or 'total_foreign_tourists' in first_item)
+                )
                 
                 if has_month and has_tourist_data:
                     df = pd.DataFrame(data)
+                    logger.info(f"Using provided data for visualization with columns: {df.columns.tolist()}")
                 else:
                     # Data doesn't have the right columns, fetch from database
+                    logger.info("Data lacks required columns, fetching from database")
                     df = self._fetch_monthly_tourist_data()
             else:
                 # No data provided, fetch from database
+                logger.info("No data provided, fetching from database")
                 df = self._fetch_monthly_tourist_data()
             
             if df is None or df.empty:
@@ -1447,25 +1544,55 @@ class VisualizationService:
             # Get x-axis values (either month_name or month)
             x_values = df['month_name'] if 'month_name' in df.columns else df['month']
             
+            # Determine column names for Swiss and foreign tourists (handle different naming conventions)
+            swiss_col = None
+            foreign_col = None
+            
+            # Check for swiss tourists column
+            for col in ['swiss_tourists', 'total_swiss_tourists']:
+                if col in df.columns:
+                    swiss_col = col
+                    break
+            
+            # Check for foreign/international tourists column
+            for col in ['foreign_tourists', 'total_foreign_tourists', 'total_international_tourists', 'international_tourists']:
+                if col in df.columns:
+                    foreign_col = col
+                    break
+            
+            if not swiss_col or not foreign_col:
+                logger.error(f"Required columns not found. Available columns: {df.columns.tolist()}")
+                return None
+            
+            logger.info(f"Using columns: {swiss_col} and {foreign_col}")
+            
             # Add bars for Swiss tourists
             fig.add_trace(go.Bar(
                 x=x_values,
-                y=df['swiss_tourists'],
+                y=df[swiss_col],
                 name='Swiss Tourists',
-                marker_color='#1E88E5'
+                marker_color='#1E88E5',
+                text=df[swiss_col].apply(lambda x: f"{int(x):,}"),
+                textposition='outside'
             ))
             
             # Add bars for foreign/international tourists
             fig.add_trace(go.Bar(
                 x=x_values,
-                y=df['foreign_tourists'],
+                y=df[foreign_col],
                 name='International Tourists',
-                marker_color='#D81B60'
+                marker_color='#D81B60',
+                text=df[foreign_col].apply(lambda x: f"{int(x):,}"),
+                textposition='outside'
             ))
+            
+            # Extract year from query or use 2023 as default
+            year_match = re.search(r'\b20\d{2}\b', query)
+            year = year_match.group(0) if year_match else '2023'
             
             # Update layout with better styling
             fig.update_layout(
-                title='Swiss and International Tourists by Month (2023)',
+                title=f'Swiss and International Tourists by Month ({year})',
                 xaxis_title='Month',
                 yaxis_title='Number of Tourists',
                 barmode='group',
@@ -1479,16 +1606,23 @@ class VisualizationService:
                 ),
                 margin=dict(l=50, r=50, t=60, b=50),
                 height=500,
-                width=900
+                font=dict(size=14)
             )
             
-            # Return the figure as JSON
+            # Format the numbers properly
+            fig.update_yaxes(tickformat=",d")
+            
+            # Return the figure as plotly_json for better frontend compatibility
             return {
-                "type": "plotly",
-                "data": json.loads(fig.to_json())
+                "type": "plotly_json",
+                "data": json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)),
+                "raw_data": df.to_dict('records'),
+                "single_value": False,
+                "column_name": "tourists_comparison"
             }
         except Exception as e:
             logger.error(f"Error creating monthly tourist comparison: {str(e)}")
+            logger.error(traceback.format_exc())
             return None
     
     def _fetch_monthly_tourist_data(self, year: int = 2023) -> pd.DataFrame:

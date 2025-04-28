@@ -249,18 +249,37 @@ class DebugService:
         return formatted_info
     
     def get_flow_info(self) -> Dict[str, Any]:
-        """Get information about the current flow execution."""
-        return {
-            "flow_id": self.message_id,
-            "steps": [asdict(step) for step in self.steps],
-            "start_time": self.flow_start_time,
-            "end_time": datetime.now() if self.steps else None,
-            "duration": (datetime.now() - self.flow_start_time).total_seconds() if self.flow_start_time else None,
-            "error": next((step.error for step in reversed(self.steps) if step.error), None)
-        }
+        """Get detailed information about the current debug flow."""
+        try:
+            end_time = datetime.now()
+            duration = (end_time - self.flow_start_time).total_seconds() if self.flow_start_time else 0
+            
+            flow_info = {
+                "flow_id": self.message_id,
+                "steps": [asdict(step) for step in self.steps],
+                "start_time": self.flow_start_time,
+                "end_time": end_time,
+                "duration": duration
+            }
+            
+            # Get the last error for convenience, if any step failed
+            for step in reversed(self.steps):
+                if step.error:
+                    flow_info["error"] = step.error
+                    break
+                    
+            return flow_info
+        except Exception as e:
+            logger.error(f"Error getting flow info: {str(e)}")
+            return {"error": f"Error getting flow info: {str(e)}"}
+    
+    def get_debug_info(self) -> Dict[str, Any]:
+        """Get debug information for the current flow - alias for get_flow_info 
+        to maintain backwards compatibility."""
+        return self.get_flow_info()
     
     def end_flow(self, success: bool = True) -> Dict[str, Any]:
-        """End the current flow and return debug info"""
+        """End the current flow and return a summary."""
         # End any current step
         if self.current_step:
             self.end_step()

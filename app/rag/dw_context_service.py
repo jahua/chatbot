@@ -7,8 +7,20 @@ from app.core.config import settings
 from app.rag.debug_service import DebugService
 
 class DWContextService:
-    def __init__(self, dw_db: Session):
-        self.dw_db = dw_db
+    def __init__(self, dw_db: Session = None):
+        """Initialize the DWContextService with a database session.
+        
+        Args:
+            dw_db: A SQLAlchemy Session object, not a generator function
+        """
+        # If dw_db is a generator, get the next value
+        if hasattr(dw_db, '__next__'):
+            try:
+                self.dw_db = next(dw_db)
+            except StopIteration:
+                self.dw_db = None
+        else:
+            self.dw_db = dw_db
         self.debug_service = DebugService()
     
     def get_visitor_insights(

@@ -31,6 +31,35 @@ from app.routers.visualization_router import router as visualization_router
 from app.services.visualization_service import VisualizationService
 from app.services.response_generation_service import ResponseGenerationService
 from app.services.sql_generation_service import SQLGenerationService
+from decimal import Decimal
+import time
+
+# Helper for JSON serialization of Decimal and Datetime
+def custom_json_serializer(obj):
+    """Convert Decimal, date, and datetime objects for JSON serialization."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    # Let the default json encoder handle other types or raise errors
+    try:
+        return json.JSONEncoder.default(None, obj) 
+    except TypeError:
+         raise TypeError(f"Type {type(obj)} not serializable")
+
+# Custom JSON encoder to handle datetime objects
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        elif isinstance(obj, decimal.Decimal):
+            return float(obj)
+        # Handle any other items that might not be JSON serializable
+        try:
+            return super().default(obj)
+        except TypeError:
+            # Fallback for any other non-serializable objects
+            return str(obj)
 
 # Ensure log directory exists
 log_dir = os.path.dirname(os.path.abspath(__file__))
@@ -90,8 +119,8 @@ async def startup_event():
         schema_service = SchemaService()
         logger.info("Schema service initialized")
 
-        # Initialize DW context service
-        dw_context_service = DWContextService(dw_db=get_dw_session())
+        # Initialize DW context service with a direct database session, not a generator
+        dw_context_service = DWContextService(dw_db=dw_db)
         logger.info("DW context service initialized")
 
         # Initialize OpenAI adapter
@@ -114,11 +143,20 @@ async def startup_event():
         sql_generation_service = SQLGenerationService(llm_adapter=llm_adapter, debug_service=debug_service)
         logger.info("SQL generation service initialized")
 
+        # Import the SQLExecutionService to avoid circular imports
+        from app.services.sql_execution_service import SQLExecutionService
+        sql_execution_service = SQLExecutionService(debug_service=debug_service)
+        logger.info("SQL execution service initialized")
+
         # Initialize chat service with the updated constructor signature
         chat_service = ChatService(
             schema_service=schema_service,
             dw_context_service=dw_context_service,
-            llm_adapter=llm_adapter
+            llm_adapter=llm_adapter,
+            sql_execution_service=sql_execution_service,
+            visualization_service=visualization_service,
+            response_generation_service=response_generation_service,
+            debug_service=debug_service
         )
 
         logger.info("Chat service initialized successfully")
@@ -189,42 +227,57 @@ def prepare_debug_info(debug_info):
 
 
 @app.post("/chat/stream")
-async def stream_chat(
-    request: ChatRequest,
-    dw_db: Session = Depends(get_dw_db),
-    chat_service: ChatService = Depends(get_chat_service),
-    debug_service: DebugService = Depends(get_debug_service)
-) -> StreamingResponse:
-    """Stream chat responses"""
+async def stream_chat(request: ChatRequest, 
+                      chat_service: ChatService = Depends(get_chat_service), 
+                      db: Session = Depends(get_dw_db)) -> StreamingResponse:
+    """Handles streaming chat requests."""
+    
     async def generate():
+        start_time = time.time()
+        logger.info(f"Received streaming chat request: {request.message}")
         try:
-            # Start with a simple message
-            yield "data: " + json.dumps({"type": "start"}) + "\n\n"
-            yield "data: " + json.dumps({"type": "content", "content": "Processing your request..."}) + "\n\n"
-
-            # Process the actual chat stream
             async for chunk in chat_service.process_chat_stream(
-                message=request.message,
-                session_id=request.session_id,
-                is_direct_query=getattr(request, 'is_direct_query', False),
-                dw_db=dw_db
-            ):
-                yield "data: " + json.dumps(chunk) + "\n\n"
-
+                    message=request.message, 
+                    session_id=request.session_id or "default_session",
+                    is_direct_query=request.is_direct_query,
+                    dw_db=db):
+                try:
+                    # Use the new custom serializer
+                    yield "data: " + json.dumps(chunk, default=custom_json_serializer) + "\n\n"
+                except TypeError as json_err:
+                    logger.error(f"JSON serialization error for chunk: {json_err} - Chunk: {chunk}")
+                    # Yield an error chunk if serialization fails
+                    error_chunk = {
+                        "type": "error",
+                        "content": f"Serialization error: {str(json_err)}",
+                        "message_id": chunk.get("message_id", "N/A") 
+                    }
+                    yield "data: " + json.dumps(error_chunk) + "\n\n"
         except Exception as e:
-            logger.error(f"Error in stream generation: {str(e)}")
-            logger.error(traceback.format_exc())
-            yield "data: " + json.dumps({"type": "error", "error": str(e)}) + "\n\n"
+            logger.error(f"Error in stream generation: {str(e)}", exc_info=True)
+            # Yield a final error chunk if the stream fails
+            error_chunk = {
+                "type": "error",
+                "content": f"Stream error: {str(e)}",
+                "message_id": "N/A" # Cannot get message_id if stream fails early
+            }
+            try:
+                yield "data: " + json.dumps(error_chunk) + "\n\n"
+            except Exception as final_err:
+                 logger.error(f"Failed to yield final error chunk: {final_err}")
+        finally:
+            end_time = time.time()
+            logger.info(f"Stream ended for request: {request.message}. Duration: {end_time - start_time:.2f}s")
+            # Ensure the generator finishes properly
+            yield "event: end\ndata: {}\n\n"
 
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
+    headers = {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no" # Useful for Nginx buffering issues
+    }
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=headers)
 
 
 @app.post("/chat")
@@ -248,17 +301,25 @@ async def chat(
         try:
             # Start debug tracking
             if debug_service:
-                debug_service.start_flow()
+                # Pass the session_id to debug_service.start_flow()
+                debug_service.start_flow(session_id=request.session_id)
                 debug_service.start_step("process_chat")
 
             # Process the message
             result = await chat_service.process_chat(
                 message=request.message,
-                debug_service=debug_service
+                session_id=request.session_id,  # Pass session_id to process_chat
+                debug_service=debug_service,
+                dw_db=dw_db
             )
             
-            # Return the response
-            return JSONResponse(content=result)
+            # Return the response with custom JSON encoder
+            serialized_content = json.dumps(result, cls=CustomJSONEncoder)
+            return JSONResponse(
+                content=json.loads(serialized_content), 
+                status_code=200,
+                media_type="application/json",
+            )
             
         except Exception as e:
             logger.error(f"Error processing chat: {str(e)}")
@@ -272,7 +333,10 @@ async def chat(
                 "status": "error",
                 "error": str(e)
             }
-            return JSONResponse(content=error_response)
+            serialized_error = json.dumps(error_response, cls=CustomJSONEncoder)
+            return JSONResponse(
+                content=json.loads(serialized_error)
+            )
 
     except Exception as e:
         logger.error(f"Error processing chat request: {str(e)}")
@@ -282,7 +346,11 @@ async def chat(
             "traceback": traceback.format_exc(),
             "status": "error"
         }
-        return JSONResponse(content=error_response, status_code=500)
+        serialized_error = json.dumps(error_response, cls=CustomJSONEncoder)
+        return JSONResponse(
+            content=json.loads(serialized_error), 
+            status_code=500
+        )
 
 
 @app.get("/health")
