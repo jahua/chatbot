@@ -9,7 +9,7 @@ if os.path.exists(dotenv_path):
 # API Configuration
 def get_api_url():
     """Get the API URL with proper error handling and defaults"""
-    base_url = os.getenv("API_URL", "http://localhost:8081").rstrip('/')
+    base_url = os.getenv("API_URL", "http://localhost:8000").rstrip('/')
     if not base_url.startswith(('http://', 'https://')):
         base_url = f"http://{base_url}"
     return base_url

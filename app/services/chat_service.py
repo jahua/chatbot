@@ -421,21 +421,35 @@ class ChatService:
             debug_service.start_step("visualization")
             visualization = None
             visualization_requested = ("chart" in message.lower() or "visual" in message.lower() or "graph" in message.lower() or "bar" in message.lower() or "plot" in message.lower())
+            
             if results and visualization_requested:
                 yield {"type": "status", "status": "Generating visualization..."}
                 # Apply same specialized logic
                 if ("swiss" in message.lower() and ("international" in message.lower() or "foreign" in message.lower()) and "tourist" in message.lower() and "month" in message.lower()):
                     visualization = self.visualization_service.create_monthly_tourist_comparison(results, message)
+                
+                # If specialized visualization didn't work, use standard visualization
                 if not visualization:
                     visualization = self.visualization_service.create_visualization(results, message)
-
+                
+                # Add visualization details to debug info and yield visualization
                 if visualization:
-                    debug_service.add_step_details({"visualization_type": visualization.get("type", "unknown"), "visualization_created": True})
+                    debug_service.add_step_details({
+                        "visualization_type": visualization.get("type", "unknown"),
+                        "visualization_created": True
+                    })
                     yield {"type": "visualization", "visualization": visualization}
                 else:
-                     debug_service.add_step_details({"visualization_created": False, "reason": "Failed to create"})
+                    debug_service.add_step_details({
+                        "visualization_created": False,
+                        "reason": "Visualization service failed to create visualization"
+                    })
             else:
-                 debug_service.add_step_details({"visualization_created": False, "reason": "Not requested or no results"})
+                debug_service.add_step_details({
+                    "visualization_created": False,
+                    "reason": "No results or visualization not requested"
+                })
+            
             debug_service.end_step("visualization")
 
             # --- Step 5: Generate Final Response ---
@@ -1017,11 +1031,11 @@ Tables:
             group_by_pattern = rf'(GROUP\s+BY\s+[^;]*?)(\b{alias}\b)([^;]*)'
             # Check if the alias exists in GROUP BY
             if re.search(group_by_pattern, fixed_query, re.IGNORECASE | re.MULTILINE):
-                 logger.info(f"Fixing GROUP BY alias '{alias}' for EXTRACT expression.")
-                 replacement_expression = f'EXTRACT({extract_type} FROM {column})'
-                 # Replace alias only within the GROUP BY part using captured groups
-                 fixed_query = re.sub(group_by_pattern, rf'\g<1>{replacement_expression}\g<3>', fixed_query, count=1, flags=re.IGNORECASE | re.MULTILINE)
-                 change_made = True
+                logger.info(f"Fixing GROUP BY alias '{alias}' for EXTRACT expression.")
+                replacement_expression = f'EXTRACT({extract_type} FROM {column})'
+                # Replace alias only within the GROUP BY part using captured groups
+                fixed_query = re.sub(group_by_pattern, rf'\g<1>{replacement_expression}\g<3>', fixed_query, count=1, flags=re.IGNORECASE | re.MULTILINE)
+                change_made = True
 
         # --- Handle DATE_TRUNC --- 
         date_trunc_pattern = r"DATE_TRUNC\s*\(\s*'([^']+)'\s*,\s*([^\)]+)\)\s+AS\s+(\w+)"
@@ -1044,7 +1058,7 @@ Tables:
         if change_made:
             logger.info(f"Original query: \n{sql_query}")
             logger.info(f"Fixed query: \n{fixed_query}")
-            
+
         return fixed_query
 
     # For spending patterns query

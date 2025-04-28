@@ -160,14 +160,15 @@ class VisualizationService:
                 if len(df.columns) >= 2:
                      # Try calling the specific pie chart creation method
                      pie_chart_viz = self._create_pie_chart(df, query)
-                     if pie_chart_viz:
+                     if pie_chart_viz and isinstance(pie_chart_viz, dict):
+                         logger.info(f"Successfully created pie chart visualization with type: {pie_chart_viz.get('type')}")
                          return pie_chart_viz
                      else:
-                         logger.warning("_create_pie_chart failed, falling back.")
+                         logger.warning(f"_create_pie_chart failed or returned non-dict: {type(pie_chart_viz)}, falling back.")
                 else:
                      logger.warning("Data not suitable for pie chart (needs >= 2 columns), falling back.")
             except Exception as pie_err:
-                 logger.error(f"Error during explicit pie chart creation: {pie_err}")
+                 logger.error(f"Error during explicit pie chart creation: {pie_err}", exc_info=True)
                  # Fall through to default logic if explicit creation fails
 
         # --- Existing Check for Monthly Tourist Comparison ---
@@ -179,11 +180,15 @@ class VisualizationService:
             logger.info("Creating monthly tourist comparison visualization")
             # Ensure data is suitable before calling
             if results and isinstance(results, list) and len(results) > 0:
-                monthly_comp_viz = self.create_monthly_tourist_comparison(results, query)
-                if monthly_comp_viz:
-                     return monthly_comp_viz
-                else:
-                     logger.warning("create_monthly_tourist_comparison failed, falling back.")
+                try:
+                    monthly_comp_viz = self.create_monthly_tourist_comparison(results, query)
+                    if monthly_comp_viz and isinstance(monthly_comp_viz, dict):
+                        logger.info(f"Successfully created monthly tourist comparison visualization with type: {monthly_comp_viz.get('type')}")
+                        return monthly_comp_viz
+                    else:
+                        logger.warning(f"create_monthly_tourist_comparison failed or returned non-dict: {type(monthly_comp_viz)}, falling back.")
+                except Exception as comp_err:
+                    logger.error(f"Error during monthly tourist comparison creation: {comp_err}", exc_info=True)
             else:
                  logger.warning("No data for monthly tourist comparison, falling back.")
         
@@ -287,10 +292,12 @@ class VisualizationService:
             if len(df) == 1 and len(df.columns) == 1:
                 logger.info(
                     f"Single value result detected: row={len(df)}, col={len(df.columns)}")
-                if self.debug_service and debug_step:
-                    self.debug_service.end_step(
-                        debug_step, "Created single value visualization")
-                return self._create_single_value_visualization(df, query)
+                # --- ADD LOGGING --- 
+                logger.debug("Calling _create_single_value_visualization")
+                single_value_viz = self._create_single_value_visualization(df, query)
+                logger.debug(f"_create_single_value_visualization returned type: {single_value_viz.get('type') if isinstance(single_value_viz, dict) else type(single_value_viz)}")
+                return single_value_viz # Return directly
+                # --- END LOGGING ---
 
             # Fast path for small result sets - return as a table
             if len(df) <= 3 and len(df.columns) <= 3:
@@ -317,16 +324,27 @@ class VisualizationService:
 
             return result
         except Exception as e:
-            logger.error(f"Error creating visualization: {str(e)}")
+            # --- ADD LOGGING --- 
+            logger.error(f"Exception in create_visualization main try block: {str(e)}", exc_info=True)
+            # --- END LOGGING --- 
             if self.debug_service and debug_step:
                 self.debug_service.end_step(
                     debug_step, f"Error creating visualization: {str(e)}", error=True)
             # Return table as fallback
             try:
-                return self._create_table(pd.DataFrame(results), query)
+                # --- ADD LOGGING --- 
+                logger.warning("Attempting fallback table creation in create_visualization except block.")
+                fallback_table = self._create_table(pd.DataFrame(results), query)
+                logger.warning(f"Fallback table created with type: {fallback_table.get('type')}")
+                return fallback_table
+                # --- END LOGGING --- 
             except BaseException:
-                return self._create_fallback_visualization(
-                    results, query, str(e))
+                # --- ADD LOGGING --- 
+                logger.error("Fallback table creation FAILED.", exc_info=True)
+                final_fallback = self._create_fallback_visualization(results, query, str(e))
+                logger.error(f"Returning final fallback of type: {final_fallback.get('type')}")
+                return final_fallback
+                # --- END LOGGING --- 
 
     def _hybrid_visualization_selection(
             self, query: str, data: pd.DataFrame) -> str:
@@ -831,8 +849,8 @@ class VisualizationService:
             max_slices = 10 
             if len(df_sorted) > max_slices:
                 logger.info(f"More than {max_slices} slices, grouping smaller ones into 'Other'.")
-                df_top = df_sorted.head(max_slices -1)
-                other_sum = df_sorted.iloc[max_slices-1:][value_col].sum()
+                df_top = df_sorted.head(max_slices - 1)
+                other_sum = df_sorted.iloc[max_slices - 1:][value_col].sum()
                 df_other = pd.DataFrame([{name_col: 'Other', value_col: other_sum}])
                 df_viz = pd.concat([df_top, df_other], ignore_index=True)
             else:
@@ -878,16 +896,19 @@ class VisualizationService:
             
             logger.info(f"Successfully created pie chart figure for {name_col} / {value_col}")
 
+            # Convert the figure to JSON properly
+            fig_dict = fig.to_dict()
+            fig_json = json.dumps(fig_dict, cls=PlotlyJSONEncoder)
+            
+            # Return with the proper structure
             return {
                 "type": "plotly_json",
-                "data": json.loads(
-                    json.dumps(
-                        fig.to_dict(),
-                        cls=PlotlyJSONEncoder)),
-                "raw_data": df.to_dict('records')} # Return original full data
+                "data": json.loads(fig_json),  # Use the properly serialized JSON 
+                "raw_data": df.to_dict('records')
+            }
 
         except Exception as e:
-            logger.error(f"Error creating pie chart: {str(e)}", exc_info=True) # Add exc_info
+            logger.error(f"Error creating pie chart: {str(e)}", exc_info=True)
             # Return None if pie chart creation fails
             return None
 
@@ -1414,31 +1435,55 @@ class VisualizationService:
             # Ensure proper formatting for frontend
             if result and result.get("type") == "plotly_json":
                 fig_dict = result.get("data", {})
+                # First, ensure fig_dict is a dictionary, not a string
                 if isinstance(fig_dict, str):
-                    fig_dict = json.loads(fig_dict)
+                    try:
+                        fig_dict = json.loads(fig_dict)
+                        logger.debug("Converted string fig_dict to dictionary")
+                    except json.JSONDecodeError:
+                        logger.error("Failed to parse fig_dict string as JSON")
+                        fig_dict = {} # Use empty dict as fallback
 
-                # Update layout for consistent styling
+                # Update layout for consistent styling if possible
                 if isinstance(fig_dict, dict) and "layout" in fig_dict:
                     layout = fig_dict["layout"]
-                    layout.update({
-                        "template": "plotly_dark",
-                        "paper_bgcolor": "rgba(0,0,0,0)",
-                        "plot_bgcolor": "rgba(17,17,17,0.1)",
-                        "font": {"color": "white", "size": 12},
-                        "margin": {"l": 60, "r": 40, "t": 60, "b": 60},
-                        "showlegend": True,
-                        "legend": {
-                            "bgcolor": "rgba(0,0,0,0.3)",
-                            "bordercolor": "rgba(255,255,255,0.2)",
-                            "borderwidth": 1,
-                            "font": {"size": 11}
-                        }
-                    })
-                    fig_dict["layout"] = layout
+                    # Ensure layout is a dictionary before updating
+                    if isinstance(layout, str):
+                        try:
+                            layout = json.loads(layout)
+                            logger.debug("Converted string layout to dictionary")
+                        except json.JSONDecodeError:
+                            logger.error("Failed to parse layout string as JSON, creating new layout")
+                            layout = {} # Use empty dict as fallback
+                    
+                    # Now that we're sure layout is a dict, update it
+                    if isinstance(layout, dict):
+                        layout.update({
+                            "template": "plotly_dark",
+                            "paper_bgcolor": "rgba(0,0,0,0)",
+                            "plot_bgcolor": "rgba(17,17,17,0.1)",
+                            "font": {"color": "white", "size": 12},
+                            "margin": {"l": 60, "r": 40, "t": 60, "b": 60},
+                            "showlegend": True,
+                            "legend": {
+                                "bgcolor": "rgba(0,0,0,0.3)",
+                                "bordercolor": "rgba(255,255,255,0.2)",
+                                "borderwidth": 1,
+                                "font": {"size": 11}
+                            }
+                        })
+                        fig_dict["layout"] = layout
+                    else:
+                        logger.warning(f"Could not update layout, it is not a dictionary: {type(layout)}")
 
                 # Ensure the data is properly JSON serialized
-                result["data"] = json.loads(
-                    json.dumps(fig_dict, cls=PlotlyJSONEncoder))
+                try:
+                    result["data"] = json.loads(
+                        json.dumps(fig_dict, cls=PlotlyJSONEncoder))
+                except Exception as json_err:
+                    logger.error(f"Error serializing figure data: {json_err}", exc_info=True)
+                    # Provide a minimal valid JSON object instead of failing completely
+                    result["data"] = {"error": "Failed to serialize visualization data"}
 
             # ---> ADD LOGGING BEFORE FINAL RETURN <---            
             final_type = result.get('type') if isinstance(result, dict) else type(result)
@@ -1449,21 +1494,26 @@ class VisualizationService:
 
         except Exception as e:
             logger.error(
-                f"Error in primary visualization, trying fallback: {str(e)}")
+                f"Error in primary visualization, trying fallback: {str(e)}", exc_info=True)
             try:
                 # Try simple bar chart as first fallback
                 return self._create_simple_bar_chart(df)
-            except BaseException:
+            except Exception as fallback_err:
+                logger.error(f"Simple bar chart fallback failed: {fallback_err}", exc_info=True)
                 # If all else fails, return as table
                 return self._create_table(df, query)
 
     def _create_single_value_visualization(
             self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
         """Create a visualization for a single value result (1 row, 1 column)"""
+        # --- ADD LOGGING --- 
+        logger.debug("Inside _create_single_value_visualization")
+        # --- END LOGGING --- 
         try:
             # Extract the value and column name
             column_name = df.columns[0]
             value = df.iloc[0, 0]
+            logger.debug(f"Extracted single value: {value} (type: {type(value)}) for column: {column_name}")
 
             # Create a plotly figure with a single value display
             fig = go.Figure()
@@ -1502,7 +1552,7 @@ class VisualizationService:
                 fig.update_layout(title=title)
 
             # Return as plotly_json
-            return {
+            result_dict = {
                 "type": "plotly_json",
                 "data": json.loads(
                     json.dumps(
@@ -1510,12 +1560,24 @@ class VisualizationService:
                         cls=PlotlyJSONEncoder)),
                 "single_value": True,
                 "column_name": column_name,
-                "value": value}
+                "value": value
+            }
+            # --- ADD LOGGING --- 
+            logger.debug("_create_single_value_visualization returning successfully.")
+            return result_dict
+            # --- END LOGGING --- 
         except Exception as e:
+            # --- MODIFIED LOGGING --- 
             logger.error(
-                f"Error creating single value visualization: {str(e)}")
+                f"Error creating single value visualization: {str(e)}", exc_info=True)
+            # --- END LOGGING --- 
             # Fall back to table visualization
-            return self._create_table(df, query)
+            # --- ADD LOGGING --- 
+            logger.warning("Attempting fallback table creation from _create_single_value_visualization except block.")
+            fallback_table = self._create_table(df, query)
+            logger.warning(f"Fallback table created with type: {fallback_table.get('type')}")
+            return fallback_table
+            # --- END LOGGING ---
 
     def get_spending_heatmap_query():
         return """

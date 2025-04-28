@@ -15,6 +15,8 @@ import warnings
 import numpy as np
 from shapely.geometry import box, MultiPolygon
 import re
+import sys
+from pathlib import Path
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +27,60 @@ st.set_page_config(
     page_icon="🗺️",
     layout="wide"
 )
+
+def find_app_root():
+    """Find the application root directory"""
+    # Current file's directory
+    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    
+    # Try to find the app root by looking for specific directories/files
+    # that would indicate we're in the app root
+    potential_root = current_dir
+    for _ in range(5):  # Only go up 5 levels max to prevent infinite loops
+        if (potential_root / "app").exists() or (potential_root / "frontend").exists():
+            return potential_root
+        potential_root = potential_root.parent
+    
+    # If we can't find a clear indicator, assume we're running from the repo root
+    return current_dir.parent.parent  # Go up two levels (pages/frontend)
+
+def locate_file(relative_path, search_paths=None):
+    """
+    Locate a file by trying multiple path variants
+    
+    Args:
+        relative_path: Path relative to app root (e.g., 'app/static/file.txt')
+        search_paths: Optional list of additional paths to try
+        
+    Returns:
+        Full path to the file if found, None otherwise
+    """
+    paths_to_try = []
+    
+    # Add custom search paths if provided
+    if search_paths:
+        paths_to_try.extend(search_paths)
+    
+    # Try app-relative paths
+    app_root = find_app_root()
+    paths_to_try.extend([
+        # Absolute paths
+        os.path.join('/', relative_path),                   # Docker-style absolute path
+        os.path.join(app_root, relative_path),              # Absolute app root path
+        
+        # Relative paths from different potential starting points
+        relative_path,                                       # Plain relative path
+        os.path.join('.', relative_path),                   # Explicit relative path
+        os.path.join('..', relative_path),                  # One level up
+        os.path.join('..', '..', relative_path),            # Two levels up
+    ])
+    
+    # Try each path
+    for path in paths_to_try:
+        if os.path.exists(path):
+            return path
+    
+    return None  # File not found
 
 # Database connection parameters
 DB_HOST = os.getenv("DB_HOST", "3.76.40.121")
@@ -111,39 +167,50 @@ def connect_to_db():
 def load_shapefile_data():
     """Load data from Ticino shapefile or create fallback data"""
     try:
-        # In Docker, the app directory is at the root
-        shapefile_path = '/app/static/geojson/shapes/g1b23.shp'
+        # Try to find the shapefile
+        shapefile_path = locate_file('app/static/geojson/shapes/g1b23.shp')
         
-        st.sidebar.info(f"Attempting to load shapefile from: {shapefile_path}")
-        
-        # Check if file exists
-        if os.path.exists(shapefile_path):
-            try:
-                # Load with explicit fiona engine
-                gdf = gpd.read_file(shapefile_path, engine="fiona")
-                
-                # Ensure the CRS is WGS84 (EPSG:4326) for Folium
-                if gdf.crs and gdf.crs != "EPSG:4326":
-                    gdf = gdf.to_crs(epsg=4326)
-                
-                # --- Filter for Ticino (KTNR = 21) ---
-                if 'KTNR' in gdf.columns:
-                    original_count = len(gdf)
-                    gdf = gdf[gdf['KTNR'] == 21]
-                    filtered_count = len(gdf)
-                    st.sidebar.info(f"Filtered shapefile for Ticino (KTNR=21). Kept {filtered_count}/{original_count} regions.")
-                    if filtered_count == 0:
-                        st.sidebar.error("Filtering for KTNR=21 resulted in 0 features. Check shapefile KTNR column.")
-                else:
-                    st.sidebar.warning("'KTNR' column not found in shapefile. Cannot filter for Ticino.")
-                # --- End Filter ---
-
-                return gdf
-            except Exception as e:
-                st.sidebar.error(f"Error loading shapefile: {str(e)}")
-                return create_fallback_data()
+        if shapefile_path:
+            st.sidebar.success(f"Found shapefile at: {shapefile_path}")
         else:
-            st.sidebar.error(f"Shapefile not found at the calculated path.")
+            # Try to find the GeoJSON file as fallback
+            geojson_path = locate_file('app/static/geojson/shapes/ticino_boundaries.geojson')
+            
+            if geojson_path:
+                st.sidebar.info(f"Using GeoJSON instead of shapefile: {geojson_path}")
+                try:
+                    gdf = gpd.read_file(geojson_path)
+                    return gdf
+                except Exception as e:
+                    st.sidebar.error(f"Error loading GeoJSON: {str(e)}")
+                    return create_fallback_data()
+            
+            st.sidebar.error("Neither shapefile nor GeoJSON found. Using fallback boundaries.")
+            return create_fallback_data()
+        
+        try:
+            # Load the shapefile with explicit fiona engine
+            gdf = gpd.read_file(shapefile_path, engine="fiona")
+            
+            # Ensure the CRS is WGS84 (EPSG:4326) for Folium
+            if gdf.crs and gdf.crs != "EPSG:4326":
+                gdf = gdf.to_crs(epsg=4326)
+            
+            # --- Filter for Ticino (KTNR = 21) ---
+            if 'KTNR' in gdf.columns:
+                original_count = len(gdf)
+                gdf = gdf[gdf['KTNR'] == 21]
+                filtered_count = len(gdf)
+                st.sidebar.info(f"Filtered shapefile for Ticino (KTNR=21). Kept {filtered_count}/{original_count} regions.")
+                if filtered_count == 0:
+                    st.sidebar.error("Filtering for KTNR=21 resulted in 0 features. Check shapefile KTNR column.")
+            else:
+                st.sidebar.warning("'KTNR' column not found in shapefile. Cannot filter for Ticino.")
+            # --- End Filter ---
+
+            return gdf
+        except Exception as e:
+            st.sidebar.error(f"Error loading shapefile: {str(e)}")
             return create_fallback_data()
     except Exception as e: # Catch errors during path calculation etc.
         st.error(f"An unexpected error occurred while locating shapefile data: {e}")
