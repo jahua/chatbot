@@ -255,6 +255,33 @@ class VisualizationService:
 
             # Convert results to DataFrame
             df = pd.DataFrame(results)
+            logger.debug(f"Initial DataFrame dtypes:\n{df.dtypes}")
+
+            # ---> ADDED: Attempt numeric conversion for common value columns <---            
+            potential_value_cols = [
+                col for col in df.columns 
+                if 'spending' in col.lower() or 
+                   'visitors' in col.lower() or 
+                   'amount' in col.lower() or 
+                   'count' in col.lower() or 
+                   'value' in col.lower() or
+                   'total' in col.lower() or 
+                   'sum' in col.lower() or 
+                   'avg' in col.lower()
+            ]
+            
+            for col in potential_value_cols:
+                if df[col].dtype == 'object': # Only attempt if currently object type
+                    try:
+                        original_dtype = df[col].dtype
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                        # Log only if dtype actually changed
+                        if df[col].dtype != original_dtype:
+                             logger.info(f"Converted column '{col}' from {original_dtype} to {df[col].dtype}")
+                    except Exception as conv_err:
+                        logger.warning(f"Could not convert column '{col}' to numeric: {conv_err}")
+            logger.debug(f"DataFrame dtypes after numeric conversion attempt:\n{df.dtypes}")
+            # ---> END ADDED SECTION <---
 
             # Special case: Handle single value results (1 row, 1 column)
             if len(df) == 1 and len(df.columns) == 1:
