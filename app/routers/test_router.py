@@ -5,6 +5,8 @@ import pandas as pd
 import plotly.express as px
 from sqlalchemy.orm import Session
 from app.db.database import get_dw_db
+from fastapi.responses import JSONResponse
+from sqlalchemy.sql import text
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -17,62 +19,89 @@ router = APIRouter(
 )
 
 @router.get("/visualization")
-async def test_visualization(db: Session = Depends(get_dw_db)):
-    """
-    Test endpoint that creates a visualization of Swiss vs International tourists for 2023.
-    This is a simple endpoint for testing visualization capabilities.
-    """
+async def get_visualization(db: Session = Depends(get_dw_db)):
+    """Generate a visualization of Swiss and foreign tourists."""
     try:
-        logger.info("Running test visualization")
+        logger.info("Generating visualization...")
         
-        # Sample SQL query to get Swiss and international tourists by month for 2023
+        # Execute SQL query to get data for the visualization
         query = """
         SELECT 
             d.year,
             d.month,
-            d.month_name,
+            d.month_name, 
             SUM(fv.swiss_tourists) as swiss_tourists,
             SUM(fv.foreign_tourists) as foreign_tourists
         FROM dw.fact_visitor fv
         JOIN dw.dim_date d ON fv.date_id = d.date_id
-        WHERE d.year = 2023
         GROUP BY d.year, d.month, d.month_name
-        ORDER BY d.month
+        ORDER BY d.year, d.month
         """
         
-        # Execute the query
-        result = db.execute(query)
+        result = db.execute(text(query))
         rows = result.fetchall()
         
-        # Check if we got any data
         if not rows:
-            logger.warning("No data returned for test visualization")
-            return {"message": "No data available"}
-            
-        # Convert to DataFrame
+            logger.warning("No data returned from query")
+            return {"error": "No data available"}
+        
+        # Convert to DataFrame for easier manipulation
         df = pd.DataFrame(rows)
         
-        # Create a visualization
+        # Determine year range for title
+        year_min = df['year'].min()
+        year_max = df['year'].max()
+        year_range = f"{year_min}" if year_min == year_max else f"{year_min}-{year_max}"
+        
+        # Create visualization
         fig = px.bar(
             df, 
-            x="month_name", 
-            y=["swiss_tourists", "foreign_tourists"],
-            title="Swiss vs International Tourists by Month (2023)",
-            labels={"value": "Number of Tourists", "month_name": "Month"},
-            barmode="group"
+            x='month_name', 
+            y=['swiss_tourists', 'foreign_tourists'],
+            barmode='group',
+            title=f'Swiss and International Tourists by Month ({year_range})',
+            labels={
+                'month_name': 'Month',
+                'value': 'Number of Tourists',
+                'variable': 'Tourist Type'
+            },
+            color_discrete_map={
+                'swiss_tourists': '#1E88E5',
+                'foreign_tourists': '#D81B60'
+            },
+            custom_data=['year']  # Include year in hover data
         )
         
-        # Return JSON representation of the figure
-        return {
-            "visualization": fig.to_json(),
-            "status": "success",
-            "message": "Test visualization created successfully"
-        }
+        # Update layout
+        fig.update_layout(
+            legend_title="Tourist Origin",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
+            hovermode="x unified",
+            xaxis=dict(
+                categoryorder='array',
+                categoryarray=[
+                    'January', 'February', 'March', 'April', 'May', 'June',
+                    'July', 'August', 'September', 'October', 'November', 'December'
+                ]
+            )
+        )
         
+        # Update hover template to show year
+        fig.update_traces(
+            hovertemplate="<b>%{y:,.0f}</b> tourists<br>Month: %{x}<br>Year: %{customdata[0]}"
+        )
+        
+        return {"visualization": fig.to_json()}
+    
     except Exception as e:
-        logger.error(f"Error creating test visualization: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(
+        logger.error(f"Error creating visualization: {str(e)}")
+        return JSONResponse(
             status_code=500,
-            detail=f"Error creating visualization: {str(e)}"
+            content={"detail": f"Error creating visualization: {str(e)}"}
         ) 

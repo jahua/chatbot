@@ -184,6 +184,9 @@ class SQLGenerationService:
              or "swiss" in user_question.lower() and "foreign" in user_question.lower())
             and "tourist" in user_question.lower() and "month" in user_question.lower()):
             
+            # If a specific year is mentioned, include it in the WHERE clause
+            year_filter = f"WHERE d.year = {target_year}" if year_match else ""
+            
             # Special case for Swiss vs international tourists by month (optimized for bar chart)
             return f"""
             SELECT 
@@ -191,12 +194,12 @@ class SQLGenerationService:
                 d.month,
                 d.month_name, 
                 SUM(fv.swiss_tourists) as swiss_tourists,
-                SUM(fv.foreign_tourists) as foreign_tourists
+                SUM(fv.foreign_tourists) as international_tourists
             FROM dw.fact_visitor fv
             JOIN dw.dim_date d ON fv.date_id = d.date_id
-            WHERE d.year = {target_year}
+            {year_filter}
             GROUP BY d.year, d.month, d.month_name
-            ORDER BY d.month
+            ORDER BY d.year, d.month
             """
         
         # Simple fallback that should work for most cases
