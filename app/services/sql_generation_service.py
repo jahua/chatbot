@@ -32,10 +32,37 @@ Your goal is to generate a syntactically correct PostgreSQL query to answer the 
     - The `season` column in `dw.dim_date` can also be used (e.g., `WHERE d.season = 'Spring'`).
     - The date column is named `full_date` (not `date`). Use this column for date operations: `DATE_TRUNC('week', d.full_date)`.
 8.  **EXTRACT Functions & GROUP BY:** 
-    - When using EXTRACT() for dates in SELECT, you MUST either:
-      a) Use the exact same EXTRACT expression in the GROUP BY clause. For example, if you have `SELECT EXTRACT(year FROM d.full_date) AS year`, then use `GROUP BY EXTRACT(year FROM d.full_date)`.
-      b) Or use d.year, d.month columns directly from dim_date instead of EXTRACT if available.
-    - DO NOT use column aliases in the GROUP BY clause when working with EXTRACT or other expressions.
+    - **IMPORTANT:** For date-based reporting, prefer using the existing columns in the dim_date table instead of EXTRACT functions:
+      ```sql
+      -- PREFERRED APPROACH - Using dim_date table columns
+      SELECT d.year, d.month, d.month_name,
+             SUM(fv.total_visitors) AS total_visitors
+      FROM dw.fact_visitor fv
+      JOIN dw.dim_date d ON fv.date_id = d.date_id
+      GROUP BY d.year, d.month, d.month_name
+      ORDER BY d.year, d.month
+      ```
+    - If you must use EXTRACT(), you MUST include the entire EXTRACT expression in the GROUP BY clause:
+      ```sql
+      -- CORRECT EXTRACT USAGE
+      SELECT EXTRACT(year FROM d.full_date) AS year, 
+             EXTRACT(month FROM d.full_date) AS month,
+             SUM(fv.total_visitors) AS total_visitors
+      FROM dw.fact_visitor fv
+      JOIN dw.dim_date d ON fv.date_id = d.date_id
+      GROUP BY EXTRACT(year FROM d.full_date), EXTRACT(month FROM d.full_date)
+      ORDER BY EXTRACT(year FROM d.full_date), EXTRACT(month FROM d.full_date)
+      ```
+    - NEVER group by column aliases in PostgreSQL:
+      ```sql
+      -- INCORRECT - DON'T DO THIS
+      SELECT EXTRACT(year FROM d.full_date) AS year, 
+             EXTRACT(month FROM d.full_date) AS month,
+             SUM(fv.total_visitors) AS total_visitors
+      FROM dw.fact_visitor fv
+      JOIN dw.dim_date d ON fv.date_id = d.date_id
+      GROUP BY year, month
+      ```
 9.  **Aggregation:** Use appropriate aggregate functions (SUM, AVG, COUNT, MAX, MIN).
 10. **Clarity:** Alias tables (e.g., `FROM dw.fact_visitor f JOIN dw.dim_date d ON ...`) for readability.
 11. **Efficiency:** Only select the necessary columns. If asking for a total or count, don't select individual rows unless needed.
@@ -152,6 +179,26 @@ class SQLGenerationService:
         year_match = re.search(r'\b20\d{2}\b', user_question)
         target_year = year_match.group(0) if year_match else '2023'
         
+        # Check for Swiss vs international tourist comparison request
+        if (("swiss" in user_question.lower() and "international" in user_question.lower() 
+             or "swiss" in user_question.lower() and "foreign" in user_question.lower())
+            and "tourist" in user_question.lower() and "month" in user_question.lower()):
+            
+            # Special case for Swiss vs international tourists by month (optimized for bar chart)
+            return f"""
+            SELECT 
+                d.year,
+                d.month,
+                d.month_name, 
+                SUM(fv.swiss_tourists) as swiss_tourists,
+                SUM(fv.foreign_tourists) as foreign_tourists
+            FROM dw.fact_visitor fv
+            JOIN dw.dim_date d ON fv.date_id = d.date_id
+            WHERE d.year = {target_year}
+            GROUP BY d.year, d.month, d.month_name
+            ORDER BY d.month
+            """
+        
         # Simple fallback that should work for most cases
         if "industry" in user_question.lower() and "spending" in user_question.lower():
             return f"""
@@ -230,32 +277,195 @@ class SQLGenerationService:
                     "spring_visitors.week_of_year, spring_visitors.total_visitors"
                 )
         
-        # Fix EXTRACT GROUP BY issues
+        # Fix EXTRACT GROUP BY issues - part 1: replace aliases with full expressions in GROUP BY
         if "EXTRACT" in fixed_query and "GROUP BY" in fixed_query:
-            logger.info("Checking for EXTRACT GROUP BY issues")
+            logger.info("Checking for GROUP BY issues with EXTRACT")
             
-            # Look for patterns like: SELECT EXTRACT(...) AS alias ... GROUP BY alias
-            extract_patterns = re.finditer(r'EXTRACT\s*\(\s*(\w+)\s+FROM\s+([^\)]+)\)\s+AS\s+(\w+)', fixed_query, re.IGNORECASE)
+            # First, find all extract expressions in the SELECT clause
+            select_extract_patterns = re.finditer(r'EXTRACT\s*\(\s*(\w+)\s+FROM\s+([^\)]+)\)\s+AS\s+(\w+)', fixed_query, re.IGNORECASE)
             
-            for match in extract_patterns:
+            # Store each alias and its corresponding EXTRACT expression
+            extract_aliases = {}
+            for match in select_extract_patterns:
                 extract_func = match.group(1)  # year, month, etc.
                 source_col = match.group(2)    # d.full_date
                 alias = match.group(3)         # year, month, etc.
+                extract_aliases[alias] = f"EXTRACT({extract_func} FROM {source_col})"
+            
+            # Now find the GROUP BY clause
+            group_by_match = re.search(r'GROUP BY\s+(.*?)(?:ORDER BY|LIMIT|;|$)', fixed_query, re.IGNORECASE | re.DOTALL)
+            
+            if group_by_match and extract_aliases:
+                group_by_clause = group_by_match.group(1).strip()
+                original_group_by = "GROUP BY " + group_by_clause
+                new_group_by_parts = []
                 
-                # Look for GROUP BY with just the alias
-                group_by_alias_pattern = rf'GROUP BY\s+{alias}(,|\s|$)'
+                # Split the group by clause by commas
+                group_by_parts = [part.strip() for part in group_by_clause.split(',')]
                 
-                if re.search(group_by_alias_pattern, fixed_query, re.IGNORECASE):
-                    logger.info(f"Found GROUP BY with alias '{alias}' instead of full EXTRACT expression")
+                for part in group_by_parts:
+                    # If this part is an alias that should be an EXTRACT expression
+                    if part in extract_aliases:
+                        new_group_by_parts.append(extract_aliases[part])
+                    else:
+                        new_group_by_parts.append(part)
+                
+                # Create the new GROUP BY clause
+                new_group_by = "GROUP BY " + ", ".join(new_group_by_parts)
+                
+                # Replace the old GROUP BY with the new one
+                fixed_query = fixed_query.replace(original_group_by, new_group_by)
+                logger.info(f"Fixed GROUP BY clause to use full EXTRACT expressions")
+        
+        # Special fix for month and year visualizations - convert to use existing dim_date columns
+        if ("month" in fixed_query.lower() or "year" in fixed_query.lower()) and "EXTRACT" in fixed_query and "d.full_date" in fixed_query:
+            # Check if we're trying to visualize by month/year
+            is_visualization_query = (
+                "month" in fixed_query.lower() and 
+                ("bar chart" in fixed_query.lower() or 
+                 "group by" in fixed_query.lower() or
+                 "order by" in fixed_query.lower())
+            )
+            
+            if is_visualization_query:
+                logger.info("Detected visualization query with EXTRACT - attempting to optimize")
+                # Try to replace EXTRACT(month FROM d.full_date) with d.month and d.month_name
+                extract_month_pattern = r'EXTRACT\s*\(\s*month\s+FROM\s+d\.full_date\s*\)(?:\s+AS\s+\w+)?'
+                extract_year_pattern = r'EXTRACT\s*\(\s*year\s+FROM\s+d\.full_date\s*\)(?:\s+AS\s+\w+)?'
+                
+                select_clause_match = re.search(r'SELECT\s+(.*?)(?:FROM|$)', fixed_query, re.IGNORECASE | re.DOTALL)
+                
+                if select_clause_match:
+                    select_clause = select_clause_match.group(1)
+                    new_select_clause = select_clause
                     
-                    # Replace GROUP BY alias with the full EXTRACT expression
-                    full_extract = f"EXTRACT({extract_func} FROM {source_col})"
-                    fixed_query = re.sub(
-                        group_by_alias_pattern,
-                        f"GROUP BY {full_extract}\\1",
-                        fixed_query
-                    )
-                    logger.info(f"Fixed GROUP BY clause to use full EXTRACT expression: {full_extract}")
+                    # Replace month extract with d.month, d.month_name
+                    if re.search(extract_month_pattern, select_clause, re.IGNORECASE):
+                        new_select_clause = re.sub(
+                            extract_month_pattern, 
+                            "d.month, d.month_name", 
+                            new_select_clause,
+                            flags=re.IGNORECASE
+                        )
+                        
+                    # Replace year extract with d.year
+                    if re.search(extract_year_pattern, select_clause, re.IGNORECASE):
+                        new_select_clause = re.sub(
+                            extract_year_pattern, 
+                            "d.year", 
+                            new_select_clause,
+                            flags=re.IGNORECASE
+                        )
+                    
+                    # Update the SELECT clause
+                    fixed_query = fixed_query.replace(select_clause, new_select_clause)
+                    
+                    # Now update GROUP BY to match
+                    group_by_match = re.search(r'GROUP BY\s+(.*?)(?:ORDER BY|LIMIT|;|$)', fixed_query, re.IGNORECASE | re.DOTALL)
+                    
+                    if group_by_match:
+                        group_by_clause = group_by_match.group(1).strip()
+                        new_group_by_clause = group_by_clause
+                        
+                        # Replace month extract in GROUP BY
+                        if re.search(extract_month_pattern, group_by_clause, re.IGNORECASE):
+                            new_group_by_clause = re.sub(
+                                extract_month_pattern, 
+                                "d.month, d.month_name", 
+                                new_group_by_clause,
+                                flags=re.IGNORECASE
+                            )
+                            
+                        # Replace year extract in GROUP BY
+                        if re.search(extract_year_pattern, group_by_clause, re.IGNORECASE):
+                            new_group_by_clause = re.sub(
+                                extract_year_pattern, 
+                                "d.year", 
+                                new_group_by_clause,
+                                flags=re.IGNORECASE
+                            )
+                        
+                        # Update the GROUP BY clause
+                        fixed_query = fixed_query.replace(
+                            f"GROUP BY {group_by_clause}", 
+                            f"GROUP BY {new_group_by_clause}"
+                        )
+                        
+                        logger.info("Optimized query to use d.month, d.month_name, and d.year instead of EXTRACT")
+
+        # Fix EXTRACT GROUP BY issues - part 2: missing column in GROUP BY
+        if "EXTRACT" in fixed_query:
+            logger.info("Checking for missing columns in GROUP BY with EXTRACT")
+            
+            # Find all EXTRACT expressions in SELECT
+            select_extracts = re.findall(r'EXTRACT\s*\(\s*(\w+)\s+FROM\s+([^\)]+)\)', fixed_query, re.IGNORECASE)
+            extract_expressions = {f"EXTRACT({func} FROM {col})": (func, col) for func, col in select_extracts}
+            
+            # If we have GROUP BY and EXTRACT expressions
+            if "GROUP BY" in fixed_query and extract_expressions:
+                group_by_match = re.search(r'GROUP BY\s+(.*?)(?:ORDER BY|LIMIT|;|$)', fixed_query, re.IGNORECASE | re.DOTALL)
+                
+                if group_by_match:
+                    group_by_clause = group_by_match.group(1).strip()
+                    logger.info(f"Current GROUP BY clause: {group_by_clause}")
+                    
+                    missing_extracts = []
+                    
+                    # Check each EXTRACT expression
+                    for extract_expr, (func, col) in extract_expressions.items():
+                        # Skip if the expression starts with "EXTRACT(EXTRACT" to avoid nesting
+                        if extract_expr.upper().startswith("EXTRACT(EXTRACT"):
+                            continue
+                            
+                        # If the exact expression doesn't appear in GROUP BY
+                        if extract_expr not in group_by_clause:
+                            # Check if column is mentioned directly in GROUP BY
+                            column_in_group_by = col in group_by_clause
+                            
+                            # If neither the EXTRACT nor the column is in GROUP BY
+                            if not column_in_group_by:
+                                logger.info(f"Column {col} from EXTRACT not found in GROUP BY, adding it")
+                                missing_extracts.append(extract_expr)
+                    
+                    if missing_extracts:
+                        # Add the missing EXTRACT expressions to GROUP BY
+                        new_group_by = f"GROUP BY {group_by_clause}, {', '.join(missing_extracts)}"
+                        fixed_query = fixed_query.replace(f"GROUP BY {group_by_clause}", new_group_by)
+                        logger.info(f"Updated GROUP BY to: {new_group_by}")
+        
+        # Ensure d.full_date is in GROUP BY if EXTRACT is used with it
+        if "d.full_date" in fixed_query and "EXTRACT" in fixed_query and "GROUP BY" in fixed_query:
+            extract_from_date_matches = re.finditer(r'EXTRACT\s*\(\s*(\w+)\s+FROM\s+d\.full_date\)', fixed_query, re.IGNORECASE)
+            
+            extract_exprs = []
+            for match in extract_from_date_matches:
+                extract_exprs.append(match.group(0))
+            
+            if extract_exprs:
+                group_by_match = re.search(r'GROUP BY\s+(.*?)(?:ORDER BY|LIMIT|;|$)', fixed_query, re.IGNORECASE | re.DOTALL)
+                
+                if group_by_match:
+                    group_by_clause = group_by_match.group(1).strip()
+                    missing_extracts = []
+                    
+                    for extract_expr in extract_exprs:
+                        # Skip if already in GROUP BY to avoid adding duplicates
+                        if extract_expr in group_by_clause:
+                            continue
+                            
+                        # Skip if it would cause nesting
+                        if extract_expr.upper().startswith("EXTRACT(EXTRACT"):
+                            continue
+                            
+                        # If neither the extract nor d.full_date is in GROUP BY
+                        if extract_expr not in group_by_clause and "d.full_date" not in group_by_clause:
+                            missing_extracts.append(extract_expr)
+                    
+                    if missing_extracts:
+                        # Add the extract expressions to GROUP BY
+                        new_group_by = f"GROUP BY {group_by_clause}, {', '.join(missing_extracts)}"
+                        fixed_query = fixed_query.replace(f"GROUP BY {group_by_clause}", new_group_by)
+                        logger.info(f"Added missing d.full_date EXTRACT to GROUP BY: {new_group_by}")
         
         # Add more fixes for common errors as they are encountered
         

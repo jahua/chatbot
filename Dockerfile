@@ -15,7 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the backend application
 COPY app ./app
-COPY scripts ./scripts
 
 # Final stage
 FROM python:3.10-slim

@@ -15,6 +15,8 @@ import re
 from io import BytesIO
 from PIL import Image
 from plotly.utils import PlotlyJSONEncoder
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -135,14 +137,24 @@ class StreamlitVisualizationService:
 
 
 class VisualizationService:
-    def __init__(self, debug_service: Optional[DebugService] = None):
-        """Initialize VisualizationService with optional debug service"""
+    def __init__(self, debug_service: Optional[DebugService] = None, db: Optional[Session] = None):
+        """Initialize VisualizationService with optional debug service and database session"""
         self.debug_service = debug_service
+        self.db = db
         logger.info("VisualizationService initialized successfully")
 
     def create_visualization(
             self, results: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
         """Create visualization based on query results."""
+        # Check if the user is requesting Swiss vs international tourists visualization
+        if ("swiss" in query.lower() and "tourist" in query.lower() and 
+            ("international" in query.lower() or "foreign" in query.lower()) and 
+            "month" in query.lower() and 
+            ("bar" in query.lower() or "chart" in query.lower() or "visuali" in query.lower())):
+            
+            logger.info("Creating monthly tourist comparison visualization")
+            return self.create_monthly_tourist_comparison(results, query)
+        
         if not results or not isinstance(results, list) or not results:
             logger.warning(
                 "Cannot create visualization: empty or invalid results")
@@ -258,28 +270,45 @@ class VisualizationService:
 
     def _hybrid_visualization_selection(
             self, query: str, data: pd.DataFrame) -> str:
-        """Enhanced hybrid approach for visualization type selection combining heuristics and data-driven patterns.
-
-        This method incorporates the intelligence from both rule-based and data pattern-based approaches.
-        """
+        """Select visualization type using a hybrid approach of query analysis and data pattern recognition"""
         try:
-            # First, try to intelligently analyze the data patterns
-            viz_type = self._select_viz_by_data_patterns(data, query)
-            if viz_type:
-                logger.info(
-                    f"Data pattern analysis selected visualization type: {viz_type}")
-                return viz_type
-
-            # If data pattern approach couldn't determine a type, fall back to
-            # rule-based
-            logger.info("Falling back to rule-based visualization selection")
-            return self._determine_visualization_type(query, data)
-
+            # Special case for Swiss vs International tourists comparison
+            if (('swiss' in query.lower() and 'international' in query.lower() or 
+                 'swiss' in query.lower() and 'foreign' in query.lower()) and
+                'tourist' in query.lower() and
+                'month' in query.lower() and
+                'swiss_tourists' in data.columns and
+                'foreign_tourists' in data.columns):
+                
+                logger.info("Detected Swiss vs International tourists comparison request. Using bar chart.")
+                return "bar"
+                
+            # 1. First check if the query explicitly mentions a visualization type
+            for viz_type, keywords in {
+                "bar": ["bar chart", "bar graph", "histogram", "column chart"],
+                "line": ["line chart", "line graph", "trend chart", "timeseries", "time series"],
+                "pie": ["pie chart", "donut chart", "breakdown", "distribution"],
+                "geo": ["map", "geographic", "spatial", "region map", "area map", "location"]
+            }.items():
+                for kw in keywords:
+                    if kw in query.lower():
+                        logger.info(f"Selected {viz_type} chart based on query keyword: {kw}")
+                        return viz_type
+            
+            # 2. Try to determine type from data patterns
+            data_based_type = self._select_viz_by_data_patterns(data, query)
+            if data_based_type:
+                logger.info(f"Selected {data_based_type} chart based on data patterns")
+                return data_based_type
+            
+            # 3. Fallback to traditional type selection
+            fallback_type = self._determine_visualization_type(query, data)
+            logger.info(f"Selected {fallback_type} chart as fallback")
+            return fallback_type
+            
         except Exception as e:
-            logger.warning(
-                f"Error in hybrid visualization selection: {str(e)}")
-            # Fall back to traditional rule-based approach
-            return self._determine_visualization_type(query, data)
+            logger.error(f"Error selecting visualization type: {str(e)}")
+            return "table"  # Default to table if something goes wrong
 
     def _select_viz_by_data_patterns(
             self,
@@ -306,18 +335,28 @@ class VisualizationService:
                 f"numeric: {len(numeric_cols)}, categorical: {len(categorical_cols)}, " +
                 f"dates: {len(date_cols)}")
 
-            # Check for key patterns
+            # Check for bar chart keywords
+            bar_chart_keywords = ["comparison", "compare", "rank", "ranking", "by month", "by year", 
+                                 "by category", "per month", "per year", "monthly", "yearly"]
+            has_bar_chart_keywords = any(keyword in query.lower() for keyword in bar_chart_keywords)
+            
+            # Prioritize bar charts for specific data patterns
+            # Comparison pattern: Any categorical with numeric values (up to a reasonable number of categories)
+            if categorical_cols and numeric_cols and len(df[categorical_cols[0]].unique()) <= 20:
+                # If there's any indication of comparison, use bar chart
+                if has_bar_chart_keywords:
+                    return "bar"
+                # For a small number of categories, bar is often better for comparison
+                if len(df[categorical_cols[0]].unique()) <= 10:
+                    return "bar"
 
             # Time series pattern: Date column + numeric columns with many rows
             if date_cols and numeric_cols and num_rows > 5:
-                # Time series analysis
+                # For monthly or yearly comparisons, bar charts often work better
+                if any(term in query.lower() for term in ["by month", "by year", "monthly", "yearly", "per month", "per year"]):
+                    return "bar"
+                # Otherwise use line chart for time series
                 return "time_series"
-
-            # Comparison pattern: Few categorical items with numeric values
-            if categorical_cols and numeric_cols and len(
-                    df[categorical_cols[0]].unique()) <= 10 and num_rows <= 15:
-                # Comparison across categories
-                return "bar"
 
             # Distribution pattern: Single categorical with percentages or
             # counts
@@ -515,8 +554,57 @@ class VisualizationService:
 
     def _create_bar_chart(self, df: pd.DataFrame,
                           query: str) -> Dict[str, Any]:
-        """Create a bar chart visualization."""
+        """Create a bar chart visualization"""
         try:
+            # Special case for Swiss vs International tourists by month
+            if ('swiss_tourists' in df.columns and 'foreign_tourists' in df.columns and 
+                'month' in df.columns and 'month_name' in df.columns):
+                
+                # Use month_name for better readability
+                month_name_col = 'month_name'
+                
+                # Sort by month number to ensure chronological order
+                if 'month' in df.columns:
+                    df = df.sort_values(by='month')
+                
+                # Create a grouped bar chart
+                fig = go.Figure()
+                
+                # Add Swiss tourists bar
+                fig.add_trace(go.Bar(
+                    x=df[month_name_col],
+                    y=df['swiss_tourists'],
+                    name='Swiss Tourists',
+                    marker_color='blue'
+                ))
+                
+                # Add International/Foreign tourists bar
+                fig.add_trace(go.Bar(
+                    x=df[month_name_col],
+                    y=df['foreign_tourists'],
+                    name='International Tourists',
+                    marker_color='red'
+                ))
+                
+                # Update layout
+                fig.update_layout(
+                    title="Swiss and International Tourists per Month",
+                    xaxis_title="Month",
+                    yaxis_title="Number of Tourists",
+                    barmode='group',
+                    legend_title="Tourist Type",
+                    template="plotly_dark"
+                )
+                
+                logger.info("Created Swiss vs International tourists bar chart")
+                
+                # Convert to plotly json for frontend
+                return {
+                    "type": "plotly",
+                    "data": json.loads(fig.to_json())
+                }
+            
+            # Continue with the original implementation for other cases
             # Identify numeric and categorical columns
             numeric_cols = df.select_dtypes(
                 include=['float64', 'int64']).columns
@@ -530,39 +618,72 @@ class VisualizationService:
             x_col = categorical_cols[0] if len(
                 categorical_cols) > 0 else df.index
             y_col = numeric_cols[0]
+            
+            # Check for time-based data
+            time_based = False
+            if self._is_date_column(df[x_col]) if isinstance(x_col, str) else False:
+                time_based = True
+                
+            # Sort data appropriately
+            if time_based:
+                # For time series, sort by date/time
+                df = df.sort_values(by=x_col)
+            else:
+                # For categorical, sort by value for better visualization
+                df = df.sort_values(by=y_col, ascending=False)
+                
+            # Get color scheme based on data
+            if len(df) <= 5:
+                color_sequence = px.colors.qualitative.Bold
+            elif len(df) <= 10:
+                color_sequence = px.colors.qualitative.Plotly
+            else:
+                color_sequence = px.colors.sequential.Blues
 
-            # Create bar chart
+            # Create bar chart with enhanced styling
             fig = px.bar(
                 df,
                 x=x_col,
                 y=y_col,
-                title=self._extract_title_from_query(query) or "Data Distribution",
-                template="plotly_dark",
-                color_discrete_sequence=px.colors.qualitative.Set3)
+                title=self._extract_title_from_query(query) or "Data Comparison",
+                template="plotly_white",  # Use a clean, modern template
+                color_discrete_sequence=color_sequence,
+                text=y_col if len(df) <= 15 else None,  # Add value labels for small datasets
+                height=500  # Slightly taller for better readability
+            )
 
             # Enhance layout
             fig.update_layout(
-                margin=dict(l=20, r=20, t=40, b=20),
+                margin=dict(l=20, r=20, t=60, b=40),
                 paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(17,17,17,0.1)",
-                font=dict(color="white"),
-                showlegend=True,
+                plot_bgcolor="rgba(248,249,250,1)",
+                font=dict(family="Arial, Helvetica, sans-serif", size=12),
+                showlegend=False,  # Hide legend for single series
                 xaxis=dict(
-                    title=x_col,
-                    tickangle=45,
-                    gridcolor="rgba(255,255,255,0.1)"
+                    title=self._format_column_name(x_col),
+                    tickangle=45 if len(df) > 5 else 0,
+                    gridcolor="rgba(230,230,230,0.5)"
                 ),
                 yaxis=dict(
-                    title=y_col,
-                    gridcolor="rgba(255,255,255,0.1)",
+                    title=self._format_column_name(y_col),
+                    gridcolor="rgba(230,230,230,0.5)",
                     tickformat=",.0f"
                 ),
-                bargap=0.2
+                bargap=0.2,
+                title=dict(
+                    font=dict(size=16, family="Arial, Helvetica, sans-serif", color="#333333"),
+                    x=0.5,
+                    xanchor='center'
+                )
             )
 
-            # Update traces for better hover info
+            # Update traces for better hover info and appearance
             fig.update_traces(
-                hovertemplate="<b>%{x}</b><br>%{y:,.0f}<extra></extra>"
+                hovertemplate="<b>%{x}</b><br>%{y:,.0f}<extra></extra>",
+                marker_line_width=0,  # Remove border
+                opacity=0.9,
+                texttemplate='%{y:,.0f}',
+                textposition='outside'
             )
 
             return {
@@ -885,7 +1006,7 @@ class VisualizationService:
         spending_cols = [
             col for col in numeric_cols if any(
                 term in col.lower() for term in [
-                    'spending', 'amount', 'total'])]
+                    'spending', 'amount', 'total', 'value', 'count', 'sum'])]
 
         # Use spending column if available, otherwise use first numeric column
         y_column = spending_cols[0] if spending_cols else numeric_cols[0]
@@ -896,34 +1017,55 @@ class VisualizationService:
         region_cols = [
             col for col in categorical_cols if any(
                 term in col.lower() for term in [
-                    'region', 'location', 'city'])]
+                    'region', 'location', 'city', 'country', 'category', 'name', 'type'])]
         x_column = region_cols[0] if region_cols else categorical_cols[0]
 
-        # Sort values by spending in descending order
+        # Sort values by spending in descending order for better visualization
         df_sorted = df.sort_values(by=y_column, ascending=False)
+        
+        # Limit to top 20 values if there are too many categories
+        if len(df_sorted) > 20:
+            df_sorted = df_sorted.head(20)
+            suffix = " (Top 20)"
+        else:
+            suffix = ""
 
-        # Create the bar chart
+        # Create the enhanced bar chart
         fig = {
             "data": [{
                 "type": "bar",
                 "x": df_sorted[x_column].tolist(),
                 "y": df_sorted[y_column].tolist(),
-                "hovertemplate": f"{x_column}: %{{x}}<br>{y_column}: %{{y:,.2f}} CHF<extra></extra>",
+                "hovertemplate": f"{x_column}: %{{x}}<br>{y_column}: %{{y:,.2f}}<extra></extra>",
+                "marker": {
+                    "color": df_sorted[y_column].tolist(), 
+                    "colorscale": "Blues",
+                },
+                "text": df_sorted[y_column].tolist(),
+                "texttemplate": "%{y:,.0f}",
+                "textposition": "outside",
             }],
             "layout": {
-                "title": title or f"{y_column} by {x_column}",
+                "title": (title or f"{self._format_column_name(y_column)} by {self._format_column_name(x_column)}") + suffix,
                 "xaxis": {
-                    "title": x_column.replace('_', ' ').title(),
-                    "tickangle": 45,
-                    "automargin": True
+                    "title": self._format_column_name(x_column),
+                    "tickangle": 45 if len(df_sorted) > 5 else 0,
+                    "automargin": True,
+                    "gridcolor": "rgba(230,230,230,0.5)",
                 },
                 "yaxis": {
-                    "title": f"{y_column.replace('_', ' ').title()} (CHF)",
-                    "automargin": True
+                    "title": f"{self._format_column_name(y_column)}",
+                    "automargin": True,
+                    "gridcolor": "rgba(230,230,230,0.5)",
+                    "zeroline": True,
+                    "zerolinecolor": "rgba(0,0,0,0.2)",
                 },
-                "margin": {"t": 50, "l": 50, "r": 20, "b": 100},
+                "margin": {"t": 60, "l": 50, "r": 20, "b": 100},
                 "showlegend": False,
-                "template": "plotly"
+                "template": "plotly_white",
+                "hoverlabel": {"bgcolor": "white", "font": {"size": 12}},
+                "bargap": 0.2,
+                "height": 500,
             }
         }
 
@@ -1258,3 +1400,128 @@ class VisualizationService:
         GROUP BY r.region_name, r.latitude, r.longitude
         ORDER BY total_spending DESC;
         """
+
+    def _format_column_name(self, column_name):
+        """Format column name for better readability in visualizations"""
+        if not isinstance(column_name, str):
+            return "Value"
+            
+        # Replace underscores with spaces
+        formatted = column_name.replace('_', ' ')
+        
+        # Capitalize each word
+        formatted = ' '.join(word.capitalize() for word in formatted.split())
+        
+        return formatted
+
+    def create_monthly_tourist_comparison(self, data: List[Dict[str, Any]], query: str) -> Dict[str, Any]:
+        """Create a bar chart comparing Swiss and international tourists by month"""
+        try:
+            # If data already includes monthly data for Swiss and foreign tourists, use it
+            if data and isinstance(data, list) and len(data) > 0:
+                # Check if we have the necessary columns in the data
+                first_item = data[0]
+                has_month = 'month' in first_item or 'month_name' in first_item
+                has_tourist_data = 'swiss_tourists' in first_item and 'foreign_tourists' in first_item
+                
+                if has_month and has_tourist_data:
+                    df = pd.DataFrame(data)
+                else:
+                    # Data doesn't have the right columns, fetch from database
+                    df = self._fetch_monthly_tourist_data()
+            else:
+                # No data provided, fetch from database
+                df = self._fetch_monthly_tourist_data()
+            
+            if df is None or df.empty:
+                logger.warning("No data available for monthly tourist comparison")
+                return None
+            
+            # Create a grouped bar chart with Plotly
+            fig = go.Figure()
+            
+            # Sort by month number if available
+            if 'month' in df.columns and not df['month'].isna().all():
+                df = df.sort_values('month')
+            
+            # Get x-axis values (either month_name or month)
+            x_values = df['month_name'] if 'month_name' in df.columns else df['month']
+            
+            # Add bars for Swiss tourists
+            fig.add_trace(go.Bar(
+                x=x_values,
+                y=df['swiss_tourists'],
+                name='Swiss Tourists',
+                marker_color='#1E88E5'
+            ))
+            
+            # Add bars for foreign/international tourists
+            fig.add_trace(go.Bar(
+                x=x_values,
+                y=df['foreign_tourists'],
+                name='International Tourists',
+                marker_color='#D81B60'
+            ))
+            
+            # Update layout with better styling
+            fig.update_layout(
+                title='Swiss and International Tourists by Month (2023)',
+                xaxis_title='Month',
+                yaxis_title='Number of Tourists',
+                barmode='group',
+                template='plotly_dark',
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                ),
+                margin=dict(l=50, r=50, t=60, b=50),
+                height=500,
+                width=900
+            )
+            
+            # Return the figure as JSON
+            return {
+                "type": "plotly",
+                "data": json.loads(fig.to_json())
+            }
+        except Exception as e:
+            logger.error(f"Error creating monthly tourist comparison: {str(e)}")
+            return None
+    
+    def _fetch_monthly_tourist_data(self, year: int = 2023) -> pd.DataFrame:
+        """Fetch monthly Swiss and international tourist data from the database"""
+        try:
+            if self.db is None:
+                logger.warning("No database session available for fetching monthly tourist data")
+                return pd.DataFrame()
+            
+            # Execute SQL query to get monthly data
+            query = text(f"""
+                SELECT 
+                    d.month,
+                    d.month_name,
+                    SUM(f.swiss_tourists) as swiss_tourists,
+                    SUM(f.foreign_tourists) as foreign_tourists
+                FROM dw.fact_visitor f
+                JOIN dw.dim_date d ON f.date_id = d.date_id
+                WHERE d.year = {year}
+                GROUP BY d.month, d.month_name
+                ORDER BY d.month
+            """)
+            
+            result = self.db.execute(query).fetchall()
+            
+            if not result:
+                logger.warning(f"No tourist data found for year {year}")
+                return pd.DataFrame()
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(result)
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error fetching monthly tourist data: {str(e)}")
+            return pd.DataFrame()

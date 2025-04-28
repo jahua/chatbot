@@ -25,6 +25,12 @@ from datetime import datetime, date
 import decimal
 from typing import Optional, Dict, Any
 from fastapi import APIRouter
+from app.routers.test_router import router as test_router
+from app.routers.analysis import router as analysis
+from app.routers.visualization_router import router as visualization_router
+from app.services.visualization_service import VisualizationService
+from app.services.response_generation_service import ResponseGenerationService
+from app.services.sql_generation_service import SQLGenerationService
 
 # Ensure log directory exists
 log_dir = os.path.dirname(os.path.abspath(__file__))
@@ -85,7 +91,7 @@ async def startup_event():
         logger.info("Schema service initialized")
 
         # Initialize DW context service
-        dw_context_service = DWContextService(dw_db=dw_db)
+        dw_context_service = DWContextService(dw_db=get_dw_session())
         logger.info("DW context service initialized")
 
         # Initialize OpenAI adapter
@@ -95,6 +101,18 @@ async def startup_event():
         # Initialize debug service
         debug_service = DebugService()
         logger.info("Debug service initialized")
+
+        # Initialize visualization service
+        visualization_service = VisualizationService(debug_service=debug_service, db=get_dw_session())
+        logger.info("Visualization service initialized")
+
+        # Initialize response generation service
+        response_generation_service = ResponseGenerationService(llm_adapter=llm_adapter, debug_service=debug_service)
+        logger.info("Response generation service initialized")
+
+        # Initialize SQL generation service
+        sql_generation_service = SQLGenerationService(llm_adapter=llm_adapter, debug_service=debug_service)
+        logger.info("SQL generation service initialized")
 
         # Initialize chat service with the updated constructor signature
         chat_service = ChatService(
@@ -212,7 +230,9 @@ async def stream_chat(
 @app.post("/chat")
 async def chat(
     request: ChatRequest,
-    dw_db: Session = Depends(get_dw_db)
+    dw_db: Session = Depends(get_dw_db),
+    chat_service: ChatService = Depends(get_chat_service),
+    debug_service: DebugService = Depends(get_debug_service)
 ) -> JSONResponse:
     """Process chat messages"""
     try:
@@ -224,15 +244,35 @@ async def chat(
                 status_code=503,
                 detail="Chat service not initialized")
 
-        # For now, create a simplified response with just the message
-        response = {
-            "message_id": str(
-                uuid.uuid4()),
-            "message": request.message,
-            "content": "This is a simplified response while we debug the issue.",
-            "status": "success"}
+        # Process the chat message using the chat service
+        try:
+            # Start debug tracking
+            if debug_service:
+                debug_service.start_flow()
+                debug_service.start_step("process_chat")
 
-        return JSONResponse(content=response)
+            # Process the message
+            result = await chat_service.process_chat(
+                message=request.message,
+                debug_service=debug_service
+            )
+            
+            # Return the response
+            return JSONResponse(content=result)
+            
+        except Exception as e:
+            logger.error(f"Error processing chat: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # Provide a friendly error response
+            error_response = {
+                "message_id": str(uuid.uuid4()),
+                "message": request.message,
+                "content": "I encountered an error while processing your request. Please try again.",
+                "status": "error",
+                "error": str(e)
+            }
+            return JSONResponse(content=error_response)
 
     except Exception as e:
         logger.error(f"Error processing chat request: {str(e)}")
@@ -276,6 +316,11 @@ async def health():
 async def root_health_check():
     """Root health check endpoint"""
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+# Include routers
+app.include_router(test_router)
+app.include_router(analysis)
+app.include_router(visualization_router)
 
 if __name__ == "__main__":
     import uvicorn

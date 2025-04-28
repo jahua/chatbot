@@ -114,7 +114,10 @@ class ResponseGenerationService:
                         })
                         self.debug_service.end_step("llm_response_generation", success=True)
                     
-                    return generated_response
+                    # Enhance response with visualization information
+                    enhanced_response = self._enhance_response_with_visualization_info(generated_response, visualization_info)
+                    
+                    return enhanced_response
                 
                 except asyncio.TimeoutError:
                     logger.error(f"LLM API call timed out after {self.api_timeout} seconds (attempt {retry_count + 1}/{max_retries})")
@@ -332,3 +335,29 @@ class ResponseGenerationService:
         # Format the prompt template with the values
         prompt = prompt_template.format(**prompt_values)
         return prompt 
+
+    def _enhance_response_with_visualization_info(
+        self, response: str, visualization_info: Optional[Dict[str, Any]]) -> str:
+        """Enhance response with visualization information"""
+        # Skip if there's no visualization or if it's not a plotly chart
+        if not visualization_info or not isinstance(visualization_info, dict):
+            return response
+        
+        # Check for Swiss and international tourist visualization
+        if (visualization_info.get("type") == "plotly" and 
+            isinstance(visualization_info.get("data"), dict) and
+            isinstance(visualization_info.get("data").get("layout"), dict) and
+            "Swiss and International Tourists" in str(visualization_info.get("data").get("layout").get("title", ""))):
+            
+            # Add a specific message for the monthly tourist comparison
+            visualization_message = (
+                "\n\nI've created a bar chart visualization comparing Swiss and international "
+                "tourists per month. The chart shows the distribution of both visitor types "
+                "throughout the year, allowing you to see seasonal patterns and compare "
+                "domestic vs. international tourism flows."
+            )
+            
+            # Add the message to the response
+            return response + visualization_message
+        
+        return response 

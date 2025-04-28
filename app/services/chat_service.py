@@ -425,6 +425,15 @@ class ChatService:
             if not results or not self.visualization_service:
                 return None
 
+            # Check for Swiss and international tourists visualization request
+            if ("swiss" in query.lower() and "tourist" in query.lower() and 
+                ("international" in query.lower() or "foreign" in query.lower()) and 
+                "month" in query.lower() and 
+                ("bar" in query.lower() or "chart" in query.lower() or "visual" in query.lower())):
+                
+                logger.info("Creating Swiss and international tourist monthly comparison")
+                return self.visualization_service.create_monthly_tourist_comparison(results, query)
+
             # Create visualization using the service
             visualization = self.visualization_service.create_visualization(
                 results, query)
