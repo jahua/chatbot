@@ -29,7 +29,7 @@ if [[ "$VIRTUAL_ENV" == "" ]]; then
 fi
 
 # Start the backend server in the background
-echo "🔄 Starting backend server on port 8080..."
+echo "🔄 Starting backend server on port 8000..."
 python run_server.py &
 BACKEND_PID=$!
 
@@ -57,7 +57,7 @@ cleanup() {
 # Keep script running until Ctrl+C
 echo -e "\n✨ Tourism Data Chatbot is running!"
 echo "📊 Frontend: http://localhost:8501"
-echo "🔌 Backend API: http://localhost:8080"
+echo "🔌 Backend API: http://localhost:8000"
 echo "Press Ctrl+C to stop all services"
 
 # Wait for children processes

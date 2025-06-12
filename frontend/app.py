@@ -126,14 +126,13 @@ if "show_raw_events" not in st.session_state:
 
 # --- API URL config ---
 # Always ensure api_url is set in session state
-st.session_state.api_url = config.API_URL.rstrip(
-    '/')  # Remove trailing slash if present
+st.session_state.api_url = config.API_URL.rstrip('/')  # Remove trailing slash if present
 print(f"DEBUG app.py: Ensuring API URL is set to {st.session_state.api_url}")
 
 
 def get_base_url():
     """Get the base URL"""
-    base_url = os.getenv("API_URL", "http://localhost:8081").rstrip('/')
+    base_url = os.getenv("API_URL", "http://localhost:8000").rstrip('/')
     if not base_url.startswith(('http://', 'https://')):
         base_url = f"http://{base_url}"
     return base_url
@@ -954,7 +953,7 @@ def main():
             st.error("API Unavailable ❌")
             st.info(
                 "Please check if the backend server is running at: " +
-                st.session_state.api_url)
+                get_base_url())
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Add a separator after status
