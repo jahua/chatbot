@@ -350,18 +350,30 @@ class VisualizationService:
             self, query: str, data: pd.DataFrame) -> str:
         """Select visualization type using a hybrid approach of query analysis and data pattern recognition"""
         try:
+            query_lower = query.lower()
+            
+            # First check for explicit line chart requests
+            if any(term in query_lower for term in ["line chart", "line graph", "trend line"]):
+                logger.info("Detected explicit line chart request")
+                return "time_series"
+            
+            # Check for trend-related terms that suggest line charts
+            if any(term in query_lower for term in ["trend", "over time", "evolution", "pattern"]) and not any(term in query_lower for term in ["by month", "by year", "monthly", "yearly"]):
+                logger.info("Detected trend-related terms suggesting line chart")
+                return "time_series"
+            
             # Special case for Swiss vs International tourists comparison
-            if (('swiss' in query.lower() and 'international' in query.lower() or 
-                 'swiss' in query.lower() and 'foreign' in query.lower()) and
-                'tourist' in query.lower() and
-                'month' in query.lower() and
+            if (('swiss' in query_lower and 'international' in query_lower or 
+                 'swiss' in query_lower and 'foreign' in query_lower) and
+                'tourist' in query_lower and
+                'month' in query_lower and
                 'swiss_tourists' in data.columns and
                 'foreign_tourists' in data.columns):
                 
                 logger.info("Detected Swiss vs International tourists comparison request. Using bar chart.")
                 return "bar"
                 
-            # 1. First check if the query explicitly mentions a visualization type
+            # Check if the query explicitly mentions a visualization type
             for viz_type, keywords in {
                 "bar": ["bar chart", "bar graph", "histogram", "column chart"],
                 "line": ["line chart", "line graph", "trend chart", "timeseries", "time series"],
@@ -369,17 +381,17 @@ class VisualizationService:
                 "geo": ["map", "geographic", "spatial", "region map", "area map", "location"]
             }.items():
                 for kw in keywords:
-                    if kw in query.lower():
+                    if kw in query_lower:
                         logger.info(f"Selected {viz_type} chart based on query keyword: {kw}")
-                        return viz_type
+                        return "time_series" if viz_type == "line" else viz_type
             
-            # 2. Try to determine type from data patterns
+            # Try to determine type from data patterns
             data_based_type = self._select_viz_by_data_patterns(data, query)
             if data_based_type:
                 logger.info(f"Selected {data_based_type} chart based on data patterns")
                 return data_based_type
             
-            # 3. Fallback to traditional type selection
+            # Fallback to traditional type selection
             fallback_type = self._determine_visualization_type(query, data)
             logger.info(f"Selected {fallback_type} chart as fallback")
             return fallback_type
@@ -397,6 +409,7 @@ class VisualizationService:
             # Get basic data characteristics
             num_rows = len(df)
             num_cols = len(df.columns)
+            query_lower = query.lower()
 
             # Identify key column types
             numeric_cols = df.select_dtypes(
@@ -413,13 +426,23 @@ class VisualizationService:
                 f"numeric: {len(numeric_cols)}, categorical: {len(categorical_cols)}, " +
                 f"dates: {len(date_cols)}")
 
+            # Time series pattern: Date column + numeric columns
+            if date_cols and numeric_cols:
+                logger.debug(f"Time series pattern matched (rows={num_rows})")
+                # For monthly or yearly comparisons without trend focus, bar charts often work better
+                if (any(term in query_lower for term in ["by month", "by year", "monthly", "yearly", "per month", "per year"]) and
+                    not any(term in query_lower for term in ["trend", "over time", "evolution", "pattern", "line chart"])):
+                    logger.debug("Choosing BAR chart for monthly/yearly comparison.")
+                    return "bar"
+                # Use line chart for time series with trend focus
+                logger.debug("Choosing TIME_SERIES chart for time pattern.")
+                return "time_series"
+
             # Check for bar chart keywords
-            bar_chart_keywords = ["comparison", "compare", "rank", "ranking", "by month", "by year", 
-                                 "by category", "per month", "per year", "monthly", "yearly"]
-            has_bar_chart_keywords = any(keyword in query.lower() for keyword in bar_chart_keywords)
+            bar_chart_keywords = ["comparison", "compare", "rank", "ranking", "distribution"]
+            has_bar_chart_keywords = any(keyword in query_lower for keyword in bar_chart_keywords)
             
             # Prioritize bar charts for specific data patterns
-            # Comparison pattern: Any categorical with numeric values (up to a reasonable number of categories)
             if categorical_cols and numeric_cols and len(df[categorical_cols[0]].unique()) <= 20:
                 # If there's any indication of comparison, use bar chart
                 if has_bar_chart_keywords:
@@ -428,109 +451,32 @@ class VisualizationService:
                 if len(df[categorical_cols[0]].unique()) <= 10:
                     return "bar"
 
-            # Time series pattern: Date column + numeric columns
-            # Allow fewer rows for time series detection
-            if date_cols and numeric_cols and num_rows >= 2:
-                logger.debug(f"Time series pattern matched (rows={num_rows})")
-                # For monthly or yearly comparisons, bar charts often work better
-                if any(term in query.lower() for term in ["by month", "by year", "monthly", "yearly", "per month", "per year"]):
-                    logger.debug("Choosing BAR chart for monthly/yearly time comparison.")
-                    return "bar"
-                # Otherwise use line chart for time series
-                logger.debug("Choosing TIME_SERIES chart for general time pattern.")
-                return "time_series"
-            else:
-                logger.debug(f"Time series pattern NOT matched (date_cols: {bool(date_cols)}, numeric_cols: {bool(numeric_cols)}, num_rows: {num_rows})")
-
-            # Distribution pattern: Single categorical with percentages or
-            # counts
+            # Distribution pattern: Single categorical with percentages or counts
             if (len(categorical_cols) == 1 and len(numeric_cols) == 1 and
                 len(df[categorical_cols[0]].unique()) <= 10 and
-                    ('percent' in query.lower() or 'distribution' in query.lower() or 'share' in query.lower())):
+                    ('percent' in query_lower or 'distribution' in query_lower or 'share' in query_lower)):
                 return "pie"
 
-            # Geographical pattern: Contains region, country, or location
-            # columns
-            geo_keywords = [
-                'region',
-                'country',
-                'location',
-                'city',
-                'state',
-                'canton']
-            has_geo_column = any(any(geo_kw in col.lower()
-                                 for geo_kw in geo_keywords) for col in df.columns)
-            if has_geo_column:
-                return "geo"
-
-            # Correlation pattern: Multiple numeric columns
-            if len(numeric_cols) >= 3 and 'correlation' in query.lower():
-                return "heatmap"
-
-            # Tabular data: Complex data or explicitly requested table
-            if num_cols > 5 or 'table' in query.lower():
-                return "table"
-
-            # No clear pattern detected
-            logger.debug("No specific data pattern detected by _select_viz_by_data_patterns.")
             return None
-
+            
         except Exception as e:
-            logger.warning(f"Error analyzing data patterns: {str(e)}")
+            logger.error(f"Error in _select_viz_by_data_patterns: {str(e)}")
             return None
 
     def _determine_visualization_type(
             self, query: str, data: pd.DataFrame) -> str:
-        """Determine the most appropriate visualization type based on the query and data."""
-
-        # Normalize query for keyword matching
+        """Determine the most appropriate visualization type based on query and data characteristics"""
         query_lower = query.lower()
-
-        # Get basic data characteristics
-        num_rows = len(data)
-        num_cols = len(data.columns)
-
-        # Identify numeric and date/time columns
-        numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
-        date_cols = [
-            col for col in data.columns if self._is_date_column(
-                data[col])]
-
-        # Log data characteristics for debugging
-        logger.debug(
-            f"Data shape: {data.shape}, numeric columns: {len(numeric_cols)}, date columns: {len(date_cols)}")
-
-        # Check for explicit visualization requests in the query
-        if "show table" in query_lower or "as table" in query_lower or "in table" in query_lower:
-            return "table"
-
-        if any(
-            term in query_lower for term in [
-                "pie chart",
-                "percentage",
-                "proportion",
-                "distribution"]):
-            return "pie"
-
-        if any(
-            term in query_lower for term in [
-                "map",
-                "location",
-                "geographic",
-                "spatial",
-                "region",
-                "canton",
-                "switzerland"]):
-            return "geo"
-
-        if any(
-            term in query_lower for term in [
-                "correlation",
-                "heatmap",
-                "heat map",
-                "relationship between"]) and len(numeric_cols) >= 2:
-            return "heatmap"
-
+        
+        # Get data characteristics
+        numeric_cols = data.select_dtypes(include=[np.number]).columns
+        date_cols = [col for col in data.columns if self._is_date_column(data[col])]
+        
+        # Check for explicit line chart requests
+        if "line chart" in query_lower or "line graph" in query_lower:
+            if date_cols:
+                return "time_series"
+        
         # Check for time series/trend indicators
         time_trend_indicators = [
             "trend",
@@ -539,17 +485,13 @@ class VisualizationService:
             "changes",
             "growth",
             "decline",
-            "year",
-            "month",
-            "day",
-            "weekly",
-            "monthly",
-            "yearly",
-            "annual"]
+            "pattern",
+            "flow"
+        ]
 
-        if (date_cols and any(term in query_lower for term in time_trend_indicators)) or any(
-                col for col in data.columns if "date" in str(col).lower() or "time" in str(col).lower() or "year" in str(col).lower()):
-            return "time_series"
+        if any(indicator in query_lower for indicator in time_trend_indicators):
+            if date_cols:
+                return "time_series"
 
         # Check for categorical comparisons
         comparison_indicators = [
@@ -561,16 +503,20 @@ class VisualizationService:
             "ranking",
             "rank",
             "top",
-            "bottom"]
-        if (len(numeric_cols) >= 1 and num_cols <= 10 and num_rows <= 20) or \
-           any(term in query_lower for term in comparison_indicators):
+            "bottom"
+        ]
+        
+        if any(indicator in query_lower for indicator in comparison_indicators):
             return "bar"
 
         # Default visualization based on data characteristics
-        if num_rows <= 20 and num_cols <= 10:
-            return "table"
+        if date_cols and numeric_cols.any():
+            # Default to time series for date-based data unless explicitly requesting monthly/yearly comparison
+            if not any(term in query_lower for term in ["by month", "by year", "monthly", "yearly"]):
+                return "time_series"
+            return "bar"
 
-        if len(numeric_cols) >= 1 and len(data.columns) <= 10:
+        if len(numeric_cols) >= 1:
             return "bar"
 
         # Fallback to table for complex data
@@ -604,6 +550,12 @@ class VisualizationService:
             # Sort by date column
             df_sorted = df.sort_values(by=x_col)
 
+            # Determine if we're dealing with hourly data
+            is_hourly = 'hour' in query.lower() or (
+                pd.api.types.is_datetime64_any_dtype(df_sorted[x_col]) and 
+                df_sorted[x_col].dt.hour.nunique() > 1
+            )
+
             # Create line chart - px.line handles multiple y-columns automatically
             logger.debug(f"Creating line chart with px.line(x='{x_col}', y={y_cols})")
             fig = px.line(
@@ -614,144 +566,81 @@ class VisualizationService:
                 template="plotly_dark", # Use dark template
                 markers=True # Add markers for fewer data points
             )
-            
-            # Customize layout
+
+            # Update layout with specific formatting for hourly data
+            if is_hourly:
+                fig.update_xaxes(
+                    tickformat="%Y-%m-%d %H:00",
+                    dtick="H1",  # Show every hour
+                    tickangle=45
+                )
+
+            # Enhance layout
             fig.update_layout(
-                 xaxis_title=self._format_column_name(x_col),
-                 yaxis_title="Value", # Generic y-axis title
-                 legend_title="Metric",
-                 margin=dict(l=40, r=20, t=60, b=40)
+                margin=dict(l=20, r=20, t=60, b=40),
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                ),
+                xaxis_title="Time",
+                yaxis_title="Number of Visitors"
             )
-            fig.update_traces(hovertemplate="<b>%{x|%Y-%m-%d}</b><br>%{fullData.name}=%{y:,.2f}<extra></extra>")
-            
-            logger.info(f"Successfully created time series chart for columns: {y_cols}")
-            
-            # ---> ADD LOGGING BEFORE RETURN <--- 
-            result_dict = {
+
+            return {
                 "type": "plotly_json",
-                "data": json.loads(
-                    json.dumps(
-                        fig.to_dict(),
-                        cls=PlotlyJSONEncoder)),
-                "raw_data": df_sorted.to_dict('records') # Use sorted data
+                "data": json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)),
+                "raw_data": df.to_dict('records')
             }
-            logger.debug(f"_create_time_series returning dict with keys: {result_dict.keys()} and type: {result_dict.get('type')}")
-            return result_dict
-            # ---> END LOGGING <--- 
 
         except Exception as e:
-            # Log the specific error encountered during time series creation
-            logger.error(f"Error creating time series chart: {str(e)}", exc_info=True) 
-            # Fallback to table representation of the data
-            logger.warning("Falling back to table visualization due to time series error.")
-            # Ensure fallback uses original df, not potentially problematic df_sorted
-            return self._create_fallback_visualization(df.to_dict('records'), query, f"Time series plot failed: {str(e)}")
+            logger.error(f"Error creating time series: {str(e)}")
+            return self._create_fallback_visualization(
+                df.to_dict('records'), query, str(e))
 
-    def _create_bar_chart(self, df: pd.DataFrame,
-                          query: str) -> Dict[str, Any]:
+    def _create_bar_chart(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
         """Create a bar chart visualization"""
         try:
             # ---> ADDED LOGGING <-----
             logger.debug(f"_create_bar_chart received data. Dtypes:\n{df.dtypes}")
             logger.debug(f"First 5 rows:\n{df.head().to_string()}")
-            # -------------------------
             
-            # Special case for Swiss vs International tourists by month
-            if ('swiss_tourists' in df.columns and 'foreign_tourists' in df.columns and 
-                'month' in df.columns and 'month_name' in df.columns):
+            # Check if we have year and quarter columns
+            if 'year' in df.columns and 'quarter' in df.columns:
+                # Create a combined period label
+                df['period'] = df['year'].astype(str) + ' Q' + df['quarter'].astype(str)
+                x_col = 'period'
                 
-                # Use month_name for better readability
-                month_name_col = 'month_name'
-                
-                # Sort by month number to ensure chronological order
-                if 'month' in df.columns:
-                    df = df.sort_values(by='month')
-                
-                # Create a grouped bar chart
-                fig = go.Figure()
-                
-                # Add Swiss tourists bar
-                fig.add_trace(go.Bar(
-                    x=df[month_name_col],
-                    y=df['swiss_tourists'],
-                    name='Swiss Tourists',
-                    marker_color='blue'
-                ))
-                
-                # Add International/Foreign tourists bar
-                fig.add_trace(go.Bar(
-                    x=df[month_name_col],
-                    y=df['foreign_tourists'],
-                    name='International Tourists',
-                    marker_color='red'
-                ))
-                
-                # Update layout
-                fig.update_layout(
-                    title="Swiss and International Tourists per Month",
-                    xaxis_title="Month",
-                    yaxis_title="Number of Tourists",
-                    barmode='group',
-                    legend_title="Tourist Type",
-                    template="plotly_dark"
-                )
-                
-                logger.info("Created Swiss vs International tourists bar chart")
-                
-                # Convert to plotly json for frontend
-                return {
-                    "type": "plotly_json", # Changed from plotly to plotly_json for consistency
-                    "data": json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)),
-                    "raw_data": df.to_dict('records')
-                }
+                # Sort by year and quarter
+                df = df.sort_values(['year', 'quarter'])
+            else:
+                # Continue with the original implementation for other cases
+                # Identify numeric and categorical columns
+                numeric_cols = df.select_dtypes(include=['float64', 'int64', 'float32', 'int32', 'int16', 'float16']).columns
+                categorical_cols = df.select_dtypes(include=['object', 'string', 'category']).columns
+
+                logger.debug(f"Identified numeric columns: {numeric_cols.tolist()}")
+                logger.debug(f"Identified categorical columns: {categorical_cols.tolist()}")
+
+                if len(numeric_cols) == 0:
+                    logger.error("No numeric columns identified in DataFrame for bar chart.")
+                    raise ValueError("No numeric columns found for bar chart values")
+
+                # Use first categorical column for x-axis, first numeric for y-axis
+                x_col = categorical_cols[0] if len(categorical_cols) > 0 else df.columns[0]
+
+            # Get the numeric column for the y-axis
+            y_col = next((col for col in df.columns if col not in [x_col, 'year', 'quarter'] 
+                         and df[col].dtype in ['float64', 'int64', 'float32', 'int32', 'int16', 'float16']), None)
             
-            # Continue with the original implementation for other cases
-            # Identify numeric and categorical columns
-            numeric_cols = df.select_dtypes(
-                include=['float64', 'int64', 'float32', 'int32', 'int16', 'float16']).columns # Broaden numeric types
-            categorical_cols = df.select_dtypes(include=['object', 'string', 'category']).columns # Broaden categorical
-
-            logger.debug(f"Identified numeric columns: {numeric_cols.tolist()}")
-            logger.debug(f"Identified categorical columns: {categorical_cols.tolist()}")
-
-            if len(numeric_cols) == 0:
-                # ---> ADDED LOGGING <-----
-                logger.error("No numeric columns identified in DataFrame for bar chart.")
-                # -------------------------
-                raise ValueError(
-                    "No numeric columns found for bar chart values")
-
-            # Use first categorical column for x-axis, first numeric for y-axis
-            x_col = categorical_cols[0] if len(
-                categorical_cols) > 0 else df.columns[0] # Fallback to first col if no categorical
-            y_col = numeric_cols[0]
-            
+            if not y_col:
+                logger.error("No suitable numeric column found for y-axis")
+                raise ValueError("No suitable numeric column found for y-axis")
+                
             logger.debug(f"Using x_col: {x_col}, y_col: {y_col}")
-
-            # Check for time-based data
-            time_based = False
-            if isinstance(x_col, str) and self._is_date_column(df[x_col]): # Ensure x_col is str
-                 time_based = True
-                 logger.debug(f"Column '{x_col}' identified as time-based.")
-            
-            # Sort data appropriately
-            if time_based:
-                # For time series, sort by date/time
-                df = df.sort_values(by=x_col)
-                logger.debug(f"Sorted data by time column: {x_col}")
-            else:
-                # For categorical, sort by value for better visualization
-                df = df.sort_values(by=y_col, ascending=False)
-                logger.debug(f"Sorted data by value column: {y_col}")
-                
-            # Get color scheme based on data
-            if len(df) <= 5:
-                color_sequence = px.colors.qualitative.Bold
-            elif len(df) <= 10:
-                color_sequence = px.colors.qualitative.Plotly
-            else:
-                # Use a sequential color scale for many bars
-                color_sequence = px.colors.sequential.Blues_r # Reversed Blues
 
             # Create bar chart with enhanced styling
             fig = px.bar(
@@ -759,11 +648,9 @@ class VisualizationService:
                 x=x_col,
                 y=y_col,
                 title=self._extract_title_from_query(query) or f"Distribution of {self._format_column_name(y_col)}",
-                template="plotly_dark", # Reverted to dark template for consistency
-                color=x_col, # Color bars by category
-                color_discrete_sequence=color_sequence,
-                text=y_col if len(df) <= 15 else None, # Add value labels for small datasets
-                height=500 # Slightly taller for better readability
+                template="plotly_dark",
+                text=df[y_col].apply(lambda x: f"{x:,.0f}"),  # Add value labels
+                height=500
             )
 
             # Enhance layout
@@ -772,10 +659,10 @@ class VisualizationService:
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(248,249,250,1)",
                 font=dict(family="Arial, Helvetica, sans-serif", size=12),
-                showlegend=False,  # Hide legend for single series
+                showlegend=False,
                 xaxis=dict(
                     title=self._format_column_name(x_col),
-                    tickangle=45 if len(df) > 5 else 0,
+                    tickangle=0,  # Keep labels horizontal for quarters
                     gridcolor="rgba(230,230,230,0.5)"
                 ),
                 yaxis=dict(
@@ -793,25 +680,21 @@ class VisualizationService:
 
             # Update traces for better hover info and appearance
             fig.update_traces(
-                hovertemplate="<b>%{x}</b><br>%{y:,.0f}<extra></extra>",
-                marker_line_width=0,  # Remove border
+                hovertemplate=f"{x_col}: %{{x}}<br>{y_col}: %{{y:,.0f}}<extra></extra>",
+                marker_line_width=0,
                 opacity=0.9,
-                texttemplate='%{y:,.0f}',
                 textposition='outside'
             )
 
             return {
                 "type": "plotly_json",
-                "data": json.loads(
-                    json.dumps(
-                        fig.to_dict(),
-                        cls=PlotlyJSONEncoder)),
-                "raw_data": df.to_dict('records')}
+                "data": json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)),
+                "raw_data": df.to_dict('records')
+            }
 
         except Exception as e:
             logger.error(f"Error creating bar chart: {str(e)}")
-            return self._create_fallback_visualization(
-                df.to_dict('records'), query, str(e))
+            return self._create_fallback_visualization(df.to_dict('records'), query, str(e))
 
     def _create_pie_chart(self, df: pd.DataFrame,
                           query: str) -> Optional[Dict[str, Any]]:

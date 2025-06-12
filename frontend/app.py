@@ -132,7 +132,7 @@ print(f"DEBUG app.py: Ensuring API URL is set to {st.session_state.api_url}")
 
 def get_base_url():
     """Get the base URL"""
-    base_url = os.getenv("API_URL", "http://localhost:8000").rstrip('/')
+    base_url = os.getenv("API_URL", "http://localhost:8081").rstrip('/')
     if not base_url.startswith(('http://', 'https://')):
         base_url = f"http://{base_url}"
     return base_url
@@ -1008,15 +1008,28 @@ def main():
 
     # Add example questions at the bottom
     st.markdown("### Example Questions")
+    
+    # First add a description of chart types
+    st.markdown("""
+    #### Chart Types:
+    - **Line Charts**: Best for showing trends over time and continuous data
+    - **Bar Charts**: Best for comparing categories or discrete time periods
+    """)
+    
     example_questions = [
-        "Swiss vs. International Tourist Monthly Trends with bar plot",
-        "Show me the daily visitor trend in 2023 with a bar chart",
-        "Show me the daily visitor trend in July 2023 with a line chart",
-        "Create a pie chart of spending distribution across different industries",
-        "Display weekly visitor trends for the first quarter of 2023",
-        "Compare visitor numbers between different regions of Switzerland",
-        "Show weekly visitor trends for spring 2023 as a line graph",
-        "Which are the top 10 regions by visitor count?"]
+        # Line chart examples (continuous data)
+        "Show me the daily visitor trend in 2023 with a line chart (shows continuous flow over time)",
+        "Track hourly visitor patterns for July 2023 with a line chart (smooth time series)",
+        "Visualize weekly tourism trends for Q1 2023 as a line graph (continuous progression)",
+        
+        # Bar chart examples (discrete comparisons)
+        "Compare monthly Swiss vs International tourists in 2023 with a bar chart (discrete monthly comparison)",
+        "Show visitor distribution across regions with a bar chart (category comparison)",
+        "Display quarterly spending by industry with a bar chart (discrete period comparison)",
+        
+        # Other chart types
+        "Create a pie chart of total spending distribution across industries",
+        "Show top 10 most visited regions with a bar chart (ranking comparison)"]
 
     # Create two columns for example questions
     col1, col2 = st.columns(2)

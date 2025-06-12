@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     
     # API URL (for frontend use)
-    API_URL: Optional[str] = os.getenv("API_URL", "http://localhost:8000")
+    API_URL: Optional[str] = os.getenv("API_URL", "http://localhost:8081")
     
     # Database settings
     POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "")

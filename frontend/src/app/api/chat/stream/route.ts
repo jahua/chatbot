@@ -5,7 +5,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     
     // Forward the request to the backend API streaming endpoint
-    const response = await fetch('http://localhost:8000/chat/stream', {
+    const response = await fetch('http://localhost:8081/chat/stream', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

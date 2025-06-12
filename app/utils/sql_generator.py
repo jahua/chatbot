@@ -386,7 +386,9 @@ class SQLGenerator:
     
     def _get_date_format_for_granularity(self, granularity: TimeGranularity) -> str:
         """Get the appropriate date format expression for the specified granularity"""
-        if granularity == TimeGranularity.DAY:
+        if granularity == TimeGranularity.HOUR:
+            return "DATE_TRUNC('hour', aoi_date)"
+        elif granularity == TimeGranularity.DAY:
             return "aoi_date"
         elif granularity == TimeGranularity.WEEK:
             return "DATE_TRUNC('week', aoi_date)"

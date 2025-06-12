@@ -29,6 +29,7 @@ class QueryIntent(Enum):
         return self.value
 
 class TimeGranularity(Enum):
+    HOUR = "hour"
     DAY = "day"
     WEEK = "week"
     MONTH = "month"
@@ -221,7 +222,9 @@ class IntentParser:
     
     def _detect_time_granularity(self, message: str) -> TimeGranularity:
         """Detect the time granularity from the message"""
-        if any(term in message for term in ["weekly", "week", "weeks"]):
+        if any(term in message for term in ["hourly", "hour", "hours", "per hour"]):
+            return TimeGranularity.HOUR
+        elif any(term in message for term in ["weekly", "week", "weeks"]):
             return TimeGranularity.WEEK
         elif any(term in message for term in ["monthly", "month", "months"]):
             return TimeGranularity.MONTH
