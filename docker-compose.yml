@@ -2,7 +2,10 @@ version: '3.8'
 
 services:
   db:
-    image: postgis/postgis:15-3.4
+    build:
+      context: ./db
+      dockerfile: Dockerfile.db
+    image: jahua/chatbot-db:latest
     restart: always
     environment:
       - POSTGRES_USER=postgres
@@ -90,7 +93,10 @@ services:
       - chatbot_network
 
   chroma:
-    image: ghcr.io/chroma-core/chroma:latest
+    build:
+      context: ./chroma
+      dockerfile: Dockerfile.chroma
+    image: jahua/chatbot-chroma:latest
     volumes:
       - index_data:/chroma/chroma
     environment:
