@@ -1007,44 +1007,55 @@ def main():
                 st.session_state.processed_queries = set()
 
     # Add example questions at the bottom
-    st.markdown("### Example Questions")
-    
-    # First add a description of chart types
+    st.markdown("### 📊 Example Questions")
     st.markdown("""
-    #### Chart Types:
-    - **Line Charts**: Best for showing trends over time and continuous data
-    - **Bar Charts**: Best for comparing categories or discrete time periods
+    Click on any question to try it out! Each visualization type is best suited for different kinds of data:
     """)
-    
-    example_questions = [
-        # Line chart examples (continuous data)
-        "Show me the daily visitor trend in 2023 with a line chart (shows continuous flow over time)",
-        "Track hourly visitor patterns for July 2023 with a line chart (smooth time series)",
-        "Visualize weekly tourism trends for Q1 2023 as a line graph (continuous progression)",
-        
-        # Bar chart examples (discrete comparisons)
-        "Compare monthly Swiss vs International tourists in 2023 with a bar chart (discrete monthly comparison)",
-        "Show visitor distribution across regions with a bar chart (category comparison)",
-        "Display quarterly spending by industry with a bar chart (discrete period comparison)",
-        
-        # Other chart types
-        "Create a pie chart of total spending distribution across industries",
-        "Show top 10 most visited regions with a bar chart (ranking comparison)"]
 
-    # Create two columns for example questions
-    col1, col2 = st.columns(2)
+    # Create three columns for different types of visualizations
+    col1, col2, col3 = st.columns(3)
 
-    # Display examples in two columns with better styling
-    for i, question in enumerate(example_questions):
-        with col1 if i % 2 == 0 else col2:
-            if st.button(
-                question,
-                key=f"example_{i}",
-                use_container_width=True,
-                help="Click to use this example"
-            ):
-                # Process the question immediately
-                process_query(question, use_streaming=True)
+    with col1:
+        st.markdown("#### 📈 Line Charts")
+        st.markdown("*Best for showing trends and patterns over time*")
+        line_questions = [
+            "Show me the daily visitor trend in 2023 with a line chart",
+            "Visualize weekly tourism trends for Q1 2023 with a line graph",
+            "Display monthly visitor trends in 2023 as a line chart",
+            "Show visitor patterns by day of week with a line chart",
+            "Visualize tourism flow by month in 2023 with a line chart"
+        ]
+        for q in line_questions:
+            if st.button(q, key=f"line_{q}", use_container_width=True, help="Click to see time-based trends"):
+                process_query(q, use_streaming=True)
+
+    with col2:
+        st.markdown("#### 📊 Bar Charts")
+        st.markdown("*Perfect for comparing categories or time periods*")
+        bar_questions = [
+            "Visualize monthly Swiss vs International tourists in 2023",
+            "Show visitor distribution across regions with a bar chart",
+            "Display quarterly spending by industry with a bar chart",
+            "Compare tourism spending across different regions",
+            "Show monthly visitor counts for top 5 regions"
+        ]
+        for q in bar_questions:
+            if st.button(q, key=f"bar_{q}", use_container_width=True, help="Click to compare categories"):
+                process_query(q, use_streaming=True)
+
+    with col3:
+        st.markdown("#### 🥧 Pie Charts")
+        st.markdown("*Ideal for showing proportions and distributions*")
+        pie_questions = [
+            "Create a pie chart of spending by industry distribution",
+            "Show the distribution of visitors by region as a pie chart",
+            "Display visitor type distribution in a pie chart",
+            "Show regional tourism market share in pie chart",
+            "Visualize tourism spending distribution by canton"
+        ]
+        for q in pie_questions:
+            if st.button(q, key=f"pie_{q}", use_container_width=True, help="Click to see distributions"):
+                process_query(q, use_streaming=True)
 
 
 # Entry point - call the main function
