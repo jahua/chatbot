@@ -1,39 +1,66 @@
 version: '3.8'
 
 services:
+  db:
+    image: postgis/postgis:15-3.4
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=336699
+      - POSTGRES_DB=trip_dw_local
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    command: postgres -c max_wal_size=4GB -c checkpoint_timeout=30min -c maintenance_work_mem=1GB -c max_parallel_workers=8 -c max_worker_processes=8 -c work_mem=64MB -c shared_buffers=1GB -c effective_cache_size=3GB
+    ports:
+      - "55432:5432"
+    networks:
+      - chatbot_network
+
   backend:
-    image: jahua/chatbot-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - OPENAI_API_KEY=${OPENAI_API_KEY}
+        - OPENAI_API_BASE=${OPENAI_API_BASE}
+        - OPENAI_MODEL=${OPENAI_MODEL}
+    env_file:
+      - .env
     ports:
       - "8080:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:336699@host.docker.internal:5432/trip_dw_local
-      - POSTGRES_HOST=host.docker.internal
+      - DATABASE_URL=postgresql://postgres:336699@db:5432/trip_dw_local
+      - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=336699
       - POSTGRES_DB=trip_dw_local
       - CHROMA_HOST=chroma
       - CHROMA_PORT=8000
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_API_BASE=${OPENAI_API_BASE}
-      - OPENAI_MODEL=${OPENAI_MODEL}
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     depends_on:
+      - db
       - chroma
     networks:
       - chatbot_network
 
   frontend:
-    image: jahua/chatbot-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+      args:
+        - OPENAI_API_KEY=${OPENAI_API_KEY}
+        - OPENAI_API_BASE=${OPENAI_API_BASE}
+        - OPENAI_MODEL=${OPENAI_MODEL}
+    env_file:
+      - .env
     ports:
       - "8501:8501"
     volumes:
@@ -42,21 +69,16 @@ services:
         target: /app/static/geojson/shapes
         read_only: true
     environment:
-      - DATABASE_URL=postgresql://postgres:336699@host.docker.internal:5432/trip_dw_local
-      - POSTGRES_HOST=host.docker.internal
+      - DATABASE_URL=postgresql://postgres:336699@db:5432/trip_dw_local
+      - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=336699
       - POSTGRES_DB=trip_dw_local
       - API_URL=http://backend:8000
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_API_BASE=${OPENAI_API_BASE}
-      - OPENAI_MODEL=${OPENAI_MODEL}
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/healthz"]
       interval: 30s
@@ -92,4 +114,6 @@ networks:
 
 volumes:
   index_data:
+    driver: local
+  pgdata:
     driver: local 

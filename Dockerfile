@@ -1,6 +1,11 @@
 # Build stage
 FROM python:3.10-slim as builder
 
+# Add build arguments
+ARG OPENAI_API_KEY
+ARG OPENAI_API_BASE
+ARG OPENAI_MODEL
+
 WORKDIR /app
 
 # Install system dependencies
@@ -18,6 +23,16 @@ COPY app ./app
 
 # Final stage
 FROM python:3.10-slim
+
+# Add build arguments again for final stage
+ARG OPENAI_API_KEY
+ARG OPENAI_API_BASE
+ARG OPENAI_MODEL
+
+# Set as environment variables
+ENV OPENAI_API_KEY=${OPENAI_API_KEY}
+ENV OPENAI_API_BASE=${OPENAI_API_BASE}
+ENV OPENAI_MODEL=${OPENAI_MODEL}
 
 WORKDIR /app
 
