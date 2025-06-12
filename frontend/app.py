@@ -1009,6 +1009,8 @@ def main():
     # Add example questions at the bottom
     st.markdown("### Example Questions")
     example_questions = [
+        "Swiss vs. International Tourist Monthly Trends with bar plot",
+        "Show me the daily visitor trend in 2023 with a bar chart",
         "Show me the daily visitor trend in July 2023 with a line chart",
         "Create a pie chart of spending distribution across different industries",
         "Display weekly visitor trends for the first quarter of 2023",
