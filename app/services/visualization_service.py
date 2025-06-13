@@ -1491,158 +1491,70 @@ class VisualizationService:
         return formatted
 
     def create_monthly_tourist_comparison(self, data: List[Dict[str, Any]], query: str) -> Dict[str, Any]:
-        """Create a bar chart comparing Swiss and international tourists by month"""
+        """
+        Creates a grouped bar chart comparing Swiss and international tourists by month.
+        """
         try:
-            logger.info(f"Creating monthly tourist comparison with data: {len(data)} rows")
-            
-            # If data already includes monthly data for Swiss and foreign tourists, use it
-            if data and isinstance(data, list) and len(data) > 0:
-                # Check if we have the necessary columns in the data
-                first_item = data[0]
-                has_month = 'month' in first_item or 'month_name' in first_item
-                has_tourist_data = (
-                    ('swiss_tourists' in first_item or 'total_swiss_tourists' in first_item) and 
-                    ('foreign_tourists' in first_item or 'total_international_tourists' in first_item or 'total_foreign_tourists' in first_item)
-                )
-                
-                if has_month and has_tourist_data:
-                    df = pd.DataFrame(data)
-                    logger.info(f"Using provided data for visualization with columns: {df.columns.tolist()}")
-                else:
-                    # Data doesn't have the right columns, fetch from database
-                    logger.info("Data lacks required columns, fetching from database")
-                    df = self._fetch_monthly_tourist_data()
-            else:
-                # No data provided, fetch from database
-                logger.info("No data provided, fetching from database")
-                df = self._fetch_monthly_tourist_data()
-            
-            if df is None or df.empty:
-                logger.warning("No data available for monthly tourist comparison")
+            df = pd.DataFrame(data)
+
+            # Ensure we have the required columns
+            required_cols = ['month_name', 'swiss_tourists', 'international_tourists']
+            if not all(col in df.columns for col in required_cols):
+                logger.warning(f"Missing required columns for monthly comparison. Available columns: {df.columns.tolist()}")
                 return None
-            
-            # Create a grouped bar chart with Plotly
+
+            # Ensure correct ordering by month name
+            month_order = [
+                "January", "February", "March", "April", "May", "June", 
+                "July", "August", "September", "October", "November", "December"
+            ]
+            df['month_name'] = pd.Categorical(df['month_name'], categories=month_order, ordered=True)
+            df = df.sort_values('month_name')
+
             fig = go.Figure()
-            
-            # Sort by month number if available
-            if 'month' in df.columns and not df['month'].isna().all():
-                df = df.sort_values('month')
-            
-            # Get x-axis values (either month_name or month)
-            x_values = df['month_name'] if 'month_name' in df.columns else df['month']
-            
-            # Determine column names for Swiss and foreign tourists (handle different naming conventions)
-            swiss_col = None
-            foreign_col = None
-            
-            # Check for swiss tourists column
-            for col in ['swiss_tourists', 'total_swiss_tourists']:
-                if col in df.columns:
-                    swiss_col = col
-                    break
-            
-            # Check for foreign/international tourists column
-            for col in ['foreign_tourists', 'total_foreign_tourists', 'total_international_tourists', 'international_tourists']:
-                if col in df.columns:
-                    foreign_col = col
-                    break
-            
-            if not swiss_col or not foreign_col:
-                logger.error(f"Required columns not found. Available columns: {df.columns.tolist()}")
-                return None
-            
-            logger.info(f"Using columns: {swiss_col} and {foreign_col}")
-            
-            # Add bars for Swiss tourists
+
+            # Add bar for Swiss tourists
             fig.add_trace(go.Bar(
-                x=x_values,
-                y=df[swiss_col],
+                x=df['month_name'],
+                y=df['swiss_tourists'],
                 name='Swiss Tourists',
-                marker_color='#1E88E5',
-                text=df[swiss_col].apply(lambda x: f"{int(x):,}"),
-                textposition='outside'
+                marker_color='#1f77b4'  # Blue
             ))
-            
-            # Add bars for foreign/international tourists
+
+            # Add bar for international tourists
             fig.add_trace(go.Bar(
-                x=x_values,
-                y=df[foreign_col],
+                x=df['month_name'],
+                y=df['international_tourists'],
                 name='International Tourists',
-                marker_color='#D81B60',
-                text=df[foreign_col].apply(lambda x: f"{int(x):,}"),
-                textposition='outside'
+                marker_color='#ff7f0e'  # Orange
             ))
-            
-            # Extract year from query or use 2023 as default
-            year_match = re.search(r'\b20\d{2}\b', query)
-            year = year_match.group(0) if year_match else '2023'
-            
-            # Update layout with better styling
+
+            title = self._extract_title_from_query(query) or "Monthly Tourist Comparison (Swiss vs. International)"
+
             fig.update_layout(
-                title=f'Swiss and International Tourists by Month ({year})',
-                xaxis_title='Month',
-                yaxis_title='Number of Tourists',
                 barmode='group',
-                template='plotly_dark',
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
+                title=dict(
+                    text=title,
+                    font=dict(size=20, color='white'),
+                    x=0.5
                 ),
-                margin=dict(l=50, r=50, t=60, b=50),
-                height=500,
-                font=dict(size=14)
+                xaxis_title="Month",
+                yaxis_title="Number of Tourists",
+                template="plotly_dark",
+                legend_title="Tourist Type",
+                height=600,
+                margin=dict(l=80, r=40, t=80, b=80),
+                plot_bgcolor='rgba(17, 17, 17, 0.1)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='white')
             )
-            
-            # Format the numbers properly
-            fig.update_yaxes(tickformat=",d")
-            
-            # Return the figure as plotly_json for better frontend compatibility
+
             return {
                 "type": "plotly_json",
                 "data": json.loads(json.dumps(fig.to_dict(), cls=PlotlyJSONEncoder)),
-                "raw_data": df.to_dict('records'),
-                "single_value": False,
-                "column_name": "tourists_comparison"
+                "query": query
             }
+
         except Exception as e:
-            logger.error(f"Error creating monthly tourist comparison: {str(e)}")
-            logger.error(traceback.format_exc())
-            return None
-    
-    def _fetch_monthly_tourist_data(self, year: int = 2023) -> pd.DataFrame:
-        """Fetch monthly Swiss and international tourist data from the database"""
-        try:
-            if self.db is None:
-                logger.warning("No database session available for fetching monthly tourist data")
-                return pd.DataFrame()
-            
-            # Execute SQL query to get monthly data
-            query = text(f"""
-                SELECT 
-                    d.month,
-                    d.month_name,
-                    SUM(f.swiss_tourists) as swiss_tourists,
-                    SUM(f.foreign_tourists) as foreign_tourists
-                FROM dw.fact_visitor f
-                JOIN dw.dim_date d ON f.date_id = d.date_id
-                WHERE d.year = {year}
-                GROUP BY d.month, d.month_name
-                ORDER BY d.month
-            """)
-            
-            result = self.db.execute(query).fetchall()
-            
-            if not result:
-                logger.warning(f"No tourist data found for year {year}")
-                return pd.DataFrame()
-            
-            # Convert to DataFrame
-            df = pd.DataFrame(result)
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error fetching monthly tourist data: {str(e)}")
-            return pd.DataFrame()
+            logger.error(f"Error creating monthly tourist comparison: {e}", exc_info=True)
+            return self._create_fallback_visualization(data, query, str(e))
